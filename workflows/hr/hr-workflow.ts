@@ -4,6 +4,7 @@ import { openai } from "@ai-sdk/openai";
 import { db } from "@/lib/db";
 import { employees, tasks, memories, costs } from "@/lib/db/schema";
 import { eq, and, sql } from "drizzle-orm";
+import { trackAICost } from "@/lib/ai/cost-tracking";
 import { start } from "workflow/api";
 import {
   managerWorkflow,
@@ -204,6 +205,7 @@ Respond in JSON format with this structure:
 
     // Try AI Gateway first, fallback to direct OpenAI provider
     let result;
+    let modelUsed = "openai/gpt-4.1";
     try {
       result = await generateText({
         model: 'openai/gpt-4.1' as never, // AI Gateway
@@ -212,6 +214,7 @@ Respond in JSON format with this structure:
     } catch (gatewayError) {
       // Fallback to direct OpenAI provider if Gateway fails
       if (process.env.OPENAI_API_KEY) {
+        modelUsed = "gpt-4o";
         result = await generateText({
           model: openai('gpt-4o'),
           prompt,
@@ -220,6 +223,14 @@ Respond in JSON format with this structure:
         throw gatewayError; // Re-throw if no OpenAI key either
       }
     }
+
+    // Track cost (HR doesn't have employeeId, use null)
+    await trackAICost(result, {
+      employeeId: null,
+      taskId: null,
+      model: modelUsed,
+      operation: "hr_task_analysis",
+    });
 
     // Parse the JSON response (handle markdown code blocks if present)
     let text = result.text.trim();
@@ -468,6 +479,7 @@ Respond in JSON format:
 
     // Try AI Gateway first, fallback to direct OpenAI provider
     let result;
+    let modelUsed = "openai/gpt-4.1";
     try {
       result = await generateText({
         model: 'openai/gpt-4.1' as never, // AI Gateway
@@ -476,6 +488,7 @@ Respond in JSON format:
     } catch (gatewayError) {
       // Fallback to direct OpenAI provider if Gateway fails
       if (process.env.OPENAI_API_KEY) {
+        modelUsed = "gpt-4o";
         result = await generateText({
           model: openai('gpt-4o'),
           prompt,
@@ -484,6 +497,14 @@ Respond in JSON format:
         throw gatewayError; // Re-throw if no OpenAI key either
       }
     }
+
+    // Track cost (HR doesn't have employeeId, use null)
+    await trackAICost(result, {
+      employeeId: null,
+      taskId: null,
+      model: modelUsed,
+      operation: "hr_ic_assignment",
+    });
 
     // Parse AI response
     let text = result.text.trim();

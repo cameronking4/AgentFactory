@@ -54,7 +54,7 @@ export const meetingTypeEnum = pgEnum("meeting_type", [
   "ping",
 ]);
 
-export const costTypeEnum = pgEnum("cost_type", ["api", "mcp", "storage"]);
+export const costTypeEnum = pgEnum("cost_type", ["api", "mcp", "storage", "tokens"]);
 
 // Tables
 export const employees = pgTable(
@@ -64,6 +64,7 @@ export const employees = pgTable(
     name: text("name").notNull(),
     role: employeeRoleEnum("role").notNull(),
     skills: text("skills").array().notNull().default([]),
+    persona: text("persona"), // Remotely configurable persona for system prompts
     status: employeeStatusEnum("status").notNull().default("active"),
     managerId: uuid("manager_id").references(() => employees.id),
     createdAt: timestamp("created_at").notNull().defaultNow(),
@@ -181,6 +182,9 @@ export const costs = pgTable(
     type: costTypeEnum("type").notNull(),
     amount: numeric("amount", { precision: 10, scale: 2 }).notNull(),
     currency: text("currency").notNull().default("USD"),
+    promptTokens: integer("prompt_tokens"), // Token usage tracking
+    completionTokens: integer("completion_tokens"),
+    totalTokens: integer("total_tokens"),
     timestamp: timestamp("timestamp").notNull().defaultNow(),
   },
   (table) => ({

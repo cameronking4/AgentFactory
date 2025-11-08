@@ -5,6 +5,7 @@ import { employees, tasks, deliverables, memories } from "@/lib/db/schema";
 import { eq, and, sql, or } from "drizzle-orm";
 import { icMeetingHook, icPingHook } from "@/workflows/shared/hooks";
 import { managerEvaluationHook } from "@/workflows/employees/manager-workflow";
+import { trackAICost } from "@/lib/ai/cost-tracking";
 import "dotenv/config";
 
 // IC Workflow State
@@ -308,6 +309,15 @@ async function breakDownTask(
       return;
     }
 
+    // Get employee record for persona
+    const [employee] = await db
+      .select()
+      .from(employees)
+      .where(eq(employees.id, employeeId))
+      .limit(1);
+
+    const persona = employee?.persona || "";
+
     // Get all ICs working on this task (or available ICs)
     const allICs = await db
       .select()
@@ -330,7 +340,7 @@ async function breakDownTask(
     // Use AI to break down the task
     const prompt = `You are an autonomous IC employee breaking down a high-level task into actionable subtasks.
 
-Your Skills: ${state.skills.join(", ")}
+${persona ? `Your Persona: ${persona}\n\n` : ""}Your Skills: ${state.skills.join(", ")}
 Your Learned Skills: ${state.learnedSkills.join(", ") || "None yet"}
 Recent Context: ${recentContext || "No recent context"}
 
@@ -365,6 +375,14 @@ Respond in JSON format:
     const result = await generateText({
       model: "openai/gpt-4.1" as never,
       prompt,
+    });
+
+    // Track cost
+    await trackAICost(result, {
+      employeeId,
+      taskId: task.id,
+      model: "openai/gpt-4.1",
+      operation: "task_breakdown",
     });
 
     // Parse breakdown
@@ -556,6 +574,15 @@ async function executeTask(
     const state = await getICState(employeeId);
     if (!state) return;
 
+    // Get employee record for persona
+    const [employee] = await db
+      .select()
+      .from(employees)
+      .where(eq(employees.id, employeeId))
+      .limit(1);
+
+    const persona = employee?.persona || "";
+
     // Get context from memories
     const relevantMemories = await db
       .select()
@@ -602,7 +629,7 @@ async function executeTask(
     // Use AI to execute the task
     const prompt = `You are an autonomous IC employee executing a task. Use your skills, learned knowledge, and context to complete this task.
 
-Your Skills: ${state.skills.join(", ")}
+${persona ? `Your Persona: ${persona}\n\n` : ""}Your Skills: ${state.skills.join(", ")}
 Your Learned Skills: ${state.learnedSkills.join(", ") || "None yet"}
 Your Reflection Insights: ${state.reflectionInsights.map((i) => i.insight).join("; ").substring(0, 500) || "None yet"}
 
@@ -634,6 +661,14 @@ Respond with a JSON object:
     const result = await generateText({
       model: "openai/gpt-4.1" as never,
       prompt,
+    });
+
+    // Track cost
+    await trackAICost(result, {
+      employeeId,
+      taskId: task.id,
+      model: "openai/gpt-4.1",
+      operation: "task_execution",
     });
 
     // Parse execution result
@@ -852,10 +887,19 @@ async function reflectOnWork(employeeId: string) {
       (d) => d.evaluatedBy && d.evaluationScore
     );
 
+    // Get employee record for persona
+    const [employee] = await db
+      .select()
+      .from(employees)
+      .where(eq(employees.id, employeeId))
+      .limit(1);
+
+    const persona = employee?.persona || "";
+
     // Use AI to reflect
     const prompt = `You are an autonomous IC employee reflecting on completed work to improve future performance.
 
-Task: ${task.title}
+${persona ? `Your Persona: ${persona}\n\n` : ""}Task: ${task.title}
 Description: ${task.description}
 Deliverables Created: ${taskDeliverables.length}
 Evaluation Score: ${evaluatedDeliverable?.evaluationScore || "Not yet evaluated"}/10
@@ -882,6 +926,14 @@ Respond in JSON:
     const result = await generateText({
       model: "openai/gpt-4.1" as never,
       prompt,
+    });
+
+    // Track cost
+    await trackAICost(result, {
+      employeeId,
+      taskId: taskId,
+      model: "openai/gpt-4.1",
+      operation: "reflection",
     });
 
     let text = result.text.trim();
@@ -956,10 +1008,19 @@ async function identifyImprovements(employeeId: string) {
 
     if (recentInsights.length === 0) return;
 
+    // Get employee record for persona
+    const [employee] = await db
+      .select()
+      .from(employees)
+      .where(eq(employees.id, employeeId))
+      .limit(1);
+
+    const persona = employee?.persona || "";
+
     // Use AI to identify actionable improvements
     const prompt = `You are an autonomous IC employee identifying improvements based on reflections.
 
-Recent Improvement Ideas: ${recentInsights.join("; ")}
+${persona ? `Your Persona: ${persona}\n\n` : ""}Recent Improvement Ideas: ${recentInsights.join("; ")}
 
 Your Skills: ${state.skills.join(", ")}
 Your Learned Skills: ${state.learnedSkills.join(", ") || "None yet"}
@@ -984,6 +1045,14 @@ Respond in JSON:
     const result = await generateText({
       model: "openai/gpt-4.1" as never,
       prompt,
+    });
+
+    // Track cost
+    await trackAICost(result, {
+      employeeId,
+      taskId: null, // No specific task for improvement identification
+      model: "openai/gpt-4.1",
+      operation: "improvement_identification",
     });
 
     let text = result.text.trim();

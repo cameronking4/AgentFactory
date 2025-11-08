@@ -4,6 +4,7 @@ import { db } from "@/lib/db";
 import { employees, tasks, deliverables, memories } from "@/lib/db/schema";
 import { eq, and, sql, desc } from "drizzle-orm";
 import { icTaskHook } from "@/workflows/employees/ic-workflow";
+import { trackAICost } from "@/lib/ai/cost-tracking";
 import "dotenv/config";
 
 // Manager Workflow State
@@ -428,7 +429,18 @@ async function evaluateDeliverable(
   "use step";
 
   try {
+    // Get manager employee record for persona
+    const [manager] = await db
+      .select()
+      .from(employees)
+      .where(eq(employees.id, managerId))
+      .limit(1);
+
+    const persona = manager?.persona || "";
+
     const prompt = `You are a QA manager evaluating a deliverable. Your job is to assess quality and provide a score from 1-10.
+
+${persona ? `Your Persona: ${persona}\n\n` : ""}
 
 Task: ${task.title}
 Task Description: ${task.description}
@@ -452,6 +464,14 @@ Respond in JSON format:
     const result = await generateText({
       model: 'openai/gpt-4.1' as never,
       prompt,
+    });
+
+    // Track cost
+    await trackAICost(result, {
+      employeeId: managerId,
+      taskId: task.id,
+      model: "openai/gpt-4.1",
+      operation: "deliverable_evaluation",
     });
 
     // Parse evaluation
@@ -751,6 +771,14 @@ Respond in JSON:
     const result = await generateText({
       model: "openai/gpt-4.1" as never,
       prompt,
+    });
+
+    // Track cost
+    await trackAICost(result, {
+      employeeId: managerId,
+      taskId: null,
+      model: "openai/gpt-4.1",
+      operation: "manager_memory_building",
     });
 
     let text = result.text.trim();
