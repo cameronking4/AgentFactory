@@ -65,12 +65,14 @@ export const employees = pgTable(
     role: employeeRoleEnum("role").notNull(),
     skills: text("skills").array().notNull().default([]),
     status: employeeStatusEnum("status").notNull().default("active"),
+    managerId: uuid("manager_id").references(() => employees.id),
     createdAt: timestamp("created_at").notNull().defaultNow(),
     updatedAt: timestamp("updated_at").notNull().defaultNow(),
   },
   (table) => ({
     statusIdx: index("employees_status_idx").on(table.status),
     roleIdx: index("employees_role_idx").on(table.role),
+    managerIdIdx: index("employees_manager_id_idx").on(table.managerId),
   })
 );
 

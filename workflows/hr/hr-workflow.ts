@@ -5,6 +5,16 @@ import { db } from "@/lib/db";
 import { employees, tasks, memories, costs } from "@/lib/db/schema";
 import { eq, and, sql } from "drizzle-orm";
 import { start } from "workflow/api";
+import {
+  managerWorkflow,
+  createInitialManagerState,
+  managerEvaluationHook,
+} from "@/workflows/employees/manager-workflow";
+import {
+  icEmployeeWorkflow,
+  createInitialICState,
+  icTaskHook,
+} from "@/workflows/employees/ic-workflow";
 import "dotenv/config";
 
 // HR Workflow State
@@ -111,7 +121,10 @@ async function handleNewTask(hrId: string, event: { taskId: string; taskTitle: s
   // 2. Determine IC requirements
   const icRequirements = await determineICRequirements(plan);
 
-  // 3. Find or hire ICs (reuse existing when possible)
+  // 3. Ensure managers exist before hiring ICs
+  await ensureManagerExists(hrId);
+
+  // 4. Find or hire ICs (reuse existing when possible)
   const assignedEmployeeIds: string[] = [];
   for (const requirement of icRequirements) {
     // Use AI to evaluate whether to reuse existing IC or hire new
@@ -126,6 +139,8 @@ async function handleNewTask(hrId: string, event: { taskId: string; taskTitle: s
       console.log(
         `[HR ${hrId}] AI decision: Reuse existing IC ${decision.selectedIC.id} (${decision.selectedIC.name}). Reason: ${decision.reason}`
       );
+      // Ensure reused IC has a manager assigned
+      await ensureICHasManager(hrId, decision.selectedIC.id);
       assignedEmployeeIds.push(decision.selectedIC.id);
     } else {
       console.log(
@@ -138,7 +153,7 @@ async function handleNewTask(hrId: string, event: { taskId: string; taskTitle: s
     }
   }
 
-  // 4. Assign task to ICs
+  // 5. Assign task to ICs
   if (assignedEmployeeIds.length > 0) {
     await assignTaskToICs(event.taskId, assignedEmployeeIds);
   }
@@ -524,7 +539,190 @@ Respond in JSON format:
 }
 
 /**
- * Hires an IC by creating an employee record and starting their workflow
+ * Ensures at least one manager exists, creates one if needed
+ */
+async function ensureManagerExists(hrId: string): Promise<string> {
+  "use step";
+
+  try {
+    // Check if any managers exist
+    const existingManagers = await db
+      .select()
+      .from(employees)
+      .where(and(eq(employees.role, "manager"), eq(employees.status, "active")));
+
+    if (existingManagers.length > 0) {
+      console.log(`[HR ${hrId}] Found ${existingManagers.length} existing manager(s)`);
+      return existingManagers[0].id; // Return first manager
+    }
+
+    // No managers exist, create one
+    console.log(`[HR ${hrId}] No managers found, creating new manager`);
+    const managerId = await createManager(hrId);
+    return managerId;
+  } catch (error) {
+    console.error(`[HR ${hrId}] Error ensuring manager exists:`, error);
+    // Return a fallback - try to get any manager or create one
+    const allManagers = await db
+      .select()
+      .from(employees)
+      .where(eq(employees.role, "manager"))
+      .limit(1);
+    
+    if (allManagers.length > 0) {
+      return allManagers[0].id;
+    }
+    
+    return await createManager(hrId);
+  }
+}
+
+/**
+ * Creates a new manager employee and starts their workflow
+ */
+async function createManager(hrId: string): Promise<string> {
+  "use step";
+
+  try {
+    // Generate a unique name for the new manager
+    const existingManagers = await db
+      .select()
+      .from(employees)
+      .where(eq(employees.role, "manager"));
+    
+    const managerNumber = existingManagers.length + 1;
+    const name = `Manager ${managerNumber}`;
+
+    // Create manager employee record
+    const [manager] = await db
+      .insert(employees)
+      .values({
+        name: name,
+        role: "manager",
+        skills: ["management", "qa", "evaluation"],
+        status: "active",
+      })
+      .returning();
+
+    console.log(`[HR ${hrId}] Created new manager: ${manager.id} (${manager.name})`);
+
+    // Start manager workflow
+    const initialState = createInitialManagerState(manager.id, manager.name);
+    await start(managerWorkflow, [initialState]);
+
+    console.log(`[HR ${hrId}] Started manager workflow for ${manager.id}`);
+
+    return manager.id;
+  } catch (error) {
+    console.error(`[HR ${hrId}] Error creating manager:`, error);
+    throw error;
+  }
+}
+
+/**
+ * Ensures an IC has a manager assigned, assigns one if not
+ */
+async function ensureICHasManager(hrId: string, icId: string): Promise<void> {
+  "use step";
+
+  try {
+    // Check if IC already has a manager
+    const [ic] = await db
+      .select()
+      .from(employees)
+      .where(eq(employees.id, icId))
+      .limit(1);
+
+    if (!ic) {
+      console.error(`[HR ${hrId}] IC ${icId} not found`);
+      return;
+    }
+
+    if (ic.managerId) {
+      console.log(`[HR ${hrId}] IC ${icId} already has manager ${ic.managerId}`);
+      return;
+    }
+
+    // IC doesn't have a manager, assign one
+    const managerId = await ensureManagerExists(hrId);
+    
+    // Assign manager to IC
+    await db
+      .update(employees)
+      .set({
+        managerId: managerId,
+        updatedAt: new Date(),
+      })
+      .where(eq(employees.id, icId));
+
+    // Notify manager workflow to track this assignment
+    try {
+      await managerEvaluationHook.resume(`manager:${managerId}`, {
+        type: "assignIC",
+        icId: icId,
+      });
+    } catch (hookError) {
+      // Hook might fail if manager workflow isn't running, that's okay
+      console.warn(`[HR ${hrId}] Could not notify manager workflow:`, hookError);
+    }
+
+    console.log(`[HR ${hrId}] Assigned manager ${managerId} to IC ${icId}`);
+  } catch (error) {
+    console.error(`[HR ${hrId}] Error ensuring IC has manager:`, error);
+  }
+}
+
+/**
+ * Finds or assigns a manager for a new IC
+ * Uses load balancing to distribute ICs across managers
+ */
+async function findOrAssignManager(hrId: string): Promise<string> {
+  "use step";
+
+  try {
+    // Get all active managers
+    const managers = await db
+      .select()
+      .from(employees)
+      .where(and(eq(employees.role, "manager"), eq(employees.status, "active")));
+
+    if (managers.length === 0) {
+      // No managers exist, create one
+      return await ensureManagerExists(hrId);
+    }
+
+    // Load balancing: find manager with fewest direct reports
+    let managerWithLeastReports = managers[0];
+    let minReportCount = Infinity;
+
+    for (const manager of managers) {
+      const directReports = await db
+        .select()
+        .from(employees)
+        .where(eq(employees.managerId, manager.id));
+      
+      const reportCount = directReports.length;
+      
+      if (reportCount < minReportCount) {
+        minReportCount = reportCount;
+        managerWithLeastReports = manager;
+      }
+    }
+
+    console.log(
+      `[HR ${hrId}] Selected manager ${managerWithLeastReports.id} (${managerWithLeastReports.name}) with ${minReportCount} direct reports`
+    );
+
+    return managerWithLeastReports.id;
+  } catch (error) {
+    console.error(`[HR ${hrId}] Error finding manager:`, error);
+    // Fallback: ensure manager exists and return it
+    return await ensureManagerExists(hrId);
+  }
+}
+
+/**
+ * Hires an IC by creating an employee record and assigning a manager
  */
 async function hireIC(hrId: string, requirement: ICRequirement): Promise<string | null> {
   "use step";
@@ -537,9 +735,12 @@ async function hireIC(hrId: string, requirement: ICRequirement): Promise<string 
       .where(eq(employees.role, "ic"));
     
     const icNumber = existingICs.length + 1;
-    const name = `IC ${icNumber}`;
+    const name = requirement.name || `IC ${icNumber}`;
 
-    // Create employee record in database
+    // Find or assign a manager
+    const managerId = await findOrAssignManager(hrId);
+
+    // Create employee record in database with manager assignment
     const [employee] = await db
       .insert(employees)
       .values({
@@ -547,15 +748,42 @@ async function hireIC(hrId: string, requirement: ICRequirement): Promise<string 
         role: requirement.role,
         skills: requirement.skills,
         status: "active",
+        managerId: managerId,
       })
       .returning();
 
-    console.log(`[HR ${hrId}] Hired new employee: ${employee.id} (${employee.name})`);
+    console.log(
+      `[HR ${hrId}] Hired new employee: ${employee.id} (${employee.name}) with manager ${managerId}`
+    );
 
-    // TODO: Start employee workflow when IC workflow is implemented
-    // For now, just create the employee record
-    // const initialState = createInitialICState(employee.id, requirement);
-    // await start(icEmployeeWorkflow, [initialState]);
+    // Notify manager workflow to track this assignment
+    try {
+      await managerEvaluationHook.resume(`manager:${managerId}`, {
+        type: "assignIC",
+        icId: employee.id,
+      });
+    } catch (hookError) {
+      // Hook might fail if manager workflow isn't running, that's okay
+      console.warn(`[HR ${hrId}] Could not notify manager workflow:`, hookError);
+    }
+
+    // Start IC workflow
+    try {
+      const initialState = createInitialICState(
+        employee.id,
+        employee.name,
+        requirement.skills,
+        managerId
+      );
+      await start(icEmployeeWorkflow, [initialState]);
+      console.log(`[HR ${hrId}] Started IC workflow for ${employee.id}`);
+    } catch (workflowError) {
+      console.error(
+        `[HR ${hrId}] Error starting IC workflow:`,
+        workflowError
+      );
+      // Continue even if workflow start fails - IC can be started manually later
+    }
 
     return employee.id;
   } catch (error) {
@@ -571,19 +799,41 @@ async function assignTaskToICs(taskId: string, employeeIds: string[]) {
   "use step";
 
   try {
-    // Update task in database to assign to first IC (for MVP)
-    // In full implementation, would create subtasks for each IC
-    if (employeeIds.length > 0) {
-      await db
-        .update(tasks)
-        .set({
-          assignedTo: employeeIds[0],
-          status: "in-progress",
-          updatedAt: new Date(),
-        })
-        .where(eq(tasks.id, taskId));
+    if (employeeIds.length === 0) {
+      console.warn(`[HR] No employees to assign task ${taskId} to`);
+      return;
+    }
 
-      console.log(`[HR] Assigned task ${taskId} to employee ${employeeIds[0]}`);
+    // Assign task to first IC (lead), but notify all ICs for collaboration
+    const leadIC = employeeIds[0];
+    
+    // Update task assignment in database (assigned to lead IC)
+    await db
+      .update(tasks)
+      .set({
+        assignedTo: leadIC,
+        status: "in-progress",
+        updatedAt: new Date(),
+      })
+      .where(eq(tasks.id, taskId));
+
+    console.log(`[HR] Assigned task ${taskId} to lead IC ${leadIC}`);
+
+    // Notify all ICs about the task (they can collaborate even if not the lead)
+    for (const employeeId of employeeIds) {
+      try {
+        await icTaskHook.resume(`ic:${employeeId}:tasks`, {
+          type: "newTask",
+          taskId: taskId,
+        });
+        console.log(`[HR] Notified IC ${employeeId} about task ${taskId}`);
+      } catch (hookError) {
+        console.warn(
+          `[HR] Could not notify IC ${employeeId} via hook:`,
+          hookError
+        );
+        // Task is still assigned in DB, IC will pick it up proactively
+      }
     }
   } catch (error) {
     console.error("Error assigning task to ICs:", error);
@@ -599,19 +849,36 @@ async function handleHireEmployee(
 ) {
   "use step";
 
-  const requirement: ICRequirement = {
-    name: event.name,
-    role: event.role,
-    skills: event.skills,
-  };
+  try {
+    if (event.role === "manager") {
+      // Create manager directly
+      const managerId = await createManager(hrId);
+      const state = await getHRState(hrId);
+      await setHRState(hrId, {
+        ...state,
+        hiredEmployees: [...state.hiredEmployees, managerId],
+      });
+      console.log(`[HR ${hrId}] Created manager ${managerId} via manual hire request`);
+    } else {
+      // Create IC with manager assignment
+      const requirement: ICRequirement = {
+        name: event.name,
+        role: event.role,
+        skills: event.skills,
+      };
 
-  const employeeId = await hireIC(hrId, requirement);
-  if (employeeId) {
-    const state = await getHRState(hrId);
-    await setHRState(hrId, {
-      ...state,
-      hiredEmployees: [...state.hiredEmployees, employeeId],
-    });
+      const employeeId = await hireIC(hrId, requirement);
+      if (employeeId) {
+        const state = await getHRState(hrId);
+        await setHRState(hrId, {
+          ...state,
+          hiredEmployees: [...state.hiredEmployees, employeeId],
+        });
+        console.log(`[HR ${hrId}] Created IC ${employeeId} via manual hire request`);
+      }
+    }
+  } catch (error) {
+    console.error(`[HR ${hrId}] Error handling hire employee request:`, error);
   }
 }
 
