@@ -1,0 +1,296 @@
+# Cursor Rules for Vercel Workflows + AI SDK Project
+
+## Project Overview
+
+This project implements an **Actor Pattern** using **Vercel Workflows** with integrated **Vercel AI SDK** capabilities. The implementation demonstrates durable, long-running AI-powered agents that can survive timeouts, handle errors gracefully, and maintain state across multiple interactions.
+
+## Package Versions
+
+Always use the latest Vercel packages:
+- **`workflow`**: `4.0.1-beta.6` - Vercel Workflows runtime
+- **`ai`**: `^5.0.89` - Vercel AI SDK (latest)
+- **`@ai-sdk/gateway`**: `^2.0.7` - AI Gateway provider
+- **`@ai-sdk/openai`**: `^2.0.64` - OpenAI provider
+- **`@ai-sdk/provider`**: `^2.0.0` - Provider utilities
+- **`next`**: `16.0.1` - Next.js framework
+- **`dotenv`**: `^17.2.3` - Environment variable management
+
+## Architecture Principles
+
+### Vercel Workflows
+
+1. **Workflow Functions**
+   - Always use `"use workflow"` directive at the top of workflow functions
+   - Use `getWorkflowMetadata()` to get unique `workflowRunId` for actor identification
+   - Workflows are durable and survive restarts - design accordingly
+
+2. **Hooks Pattern**
+   - Use `defineHook<T>()` for type-safe hooks (not `createHook()`)
+   - Create hooks **outside** event loops for efficiency
+   - Use deterministic tokens: `counter_actor:${actorId}` pattern
+   - Hooks are async iterators - use `for await...of` pattern
+   - Reference: [Hooks Guide](https://vercel.com/docs/workflows/foundations/hooks)
+
+3. **Step Functions**
+   - Mark stateful operations with `"use step"` directive
+   - Steps are durable and automatically retryable
+   - Separate workflow orchestration from step execution
+   - Reference: [Workflows and Steps Guide](https://vercel.com/docs/workflows/foundations/workflows-and-steps)
+
+4. **State Management**
+   - Check for existing state before initializing to prevent overwriting on restarts
+   - Use step functions for state operations (`getState`, `setState`)
+   - In production, use persistent storage (Redis, Upstash, database)
+   - Current implementation uses in-memory store for demo purposes
+
+5. **Error Handling**
+   - Continue processing events even if one fails
+   - Handle `FatalError` appropriately in API routes
+   - Use try-catch in event loops
+
+### AI SDK Integration
+
+1. **Fetch Configuration**
+   - **CRITICAL**: Always set `globalThis.fetch = fetch` at the start of workflow functions
+   - Import `fetch` from `"workflow"` package
+   - This is required for AI SDK to make HTTP requests in workflows
+   - Reference: [AI SDK + Workflows Guide](./AI_SDK_WORKFLOWS_GUIDE.md)
+
+2. **Vercel AI Gateway**
+   - Use plain string model IDs (e.g., `'openai/gpt-4.1'`) for AI Gateway
+   - Plain strings automatically route through Vercel AI Gateway in AI SDK v5
+   - Type assertion needed: `'openai/gpt-4.1' as never` (TypeScript limitation)
+   - Reference: [AI Gateway Guide](https://vercel.com/docs/ai-sdk/providers/ai-gateway)
+
+3. **AI Operations as Step Functions**
+   - Mark AI SDK calls with `"use step"` for durability
+   - AI operations should be retryable and observable
+   - Include context (like actor state) in AI prompts
+
+4. **Error Handling for AI**
+   - Always wrap AI SDK calls in try-catch
+   - Provide fallback responses on AI generation failures
+   - Log errors for debugging
+
+## Code Patterns
+
+### Workflow Function Template
+
+```typescript
+export async function myWorkflow(initialState: MyState) {
+  "use workflow";
+
+  // Set up fetch for AI SDK (required!)
+  globalThis.fetch = fetch;
+
+  // Get workflow metadata for actor ID
+  const metadata = getWorkflowMetadata();
+  const actorId = metadata.workflowRunId;
+
+  // Check for existing state before initializing
+  const existingState = await getState(actorId);
+  if (!existingState || /* check if truly empty */) {
+    await setState(actorId, initialState);
+  }
+
+  // Create hook OUTSIDE the loop
+  const receiveEvent = myHook.create({
+    token: `my_actor:${actorId}`, // Deterministic token
+  });
+
+  // Event loop with async iterator
+  for await (const event of receiveEvent) {
+    try {
+      const state = await getState(actorId);
+      const newState = await computeNewState(state, event);
+      await setState(actorId, newState);
+    } catch (err) {
+      console.error(`Error processing event:`, err);
+      // Continue processing
+    }
+  }
+}
+```
+
+### Step Function Template
+
+```typescript
+async function myStepFunction(param: string): Promise<Result> {
+  "use step";
+  
+  // Durable, retryable operation
+  // This will be persisted and can survive restarts
+  return result;
+}
+```
+
+### AI SDK Integration Template
+
+```typescript
+async function generateAIText(prompt: string, context: State): Promise<string> {
+  "use step";
+
+  try {
+    const contextualPrompt = `Context: ${JSON.stringify(context)}\n\nUser: ${prompt}`;
+    
+    const result = await generateText({
+      model: 'openai/gpt-4.1' as never, // AI Gateway via plain string
+      prompt: contextualPrompt,
+      maxTokens: 500,
+    });
+
+    return result.text;
+  } catch (error) {
+    console.error("AI generation error:", error);
+    return `Error: ${error instanceof Error ? error.message : "Unknown error"}`;
+  }
+}
+```
+
+### Hook Definition Pattern
+
+```typescript
+// Define hook once for type safety
+export const myHook = defineHook<MyEventType>();
+
+// In workflow
+const hook = myHook.create({
+  token: `my_actor:${actorId}`,
+});
+
+// In API route
+await myHook.resume(token, event);
+```
+
+## API Route Patterns
+
+### Starting Workflows
+
+```typescript
+import { start } from "workflow/api";
+import { FatalError } from "workflow";
+
+export async function POST(request: Request) {
+  try {
+    const result = await start(myWorkflow, [initialState]);
+    return NextResponse.json({
+      success: true,
+      actorId: result.runId,
+    });
+  } catch (error) {
+    const isFatal = error instanceof FatalError;
+    return NextResponse.json(
+      { error: error.message, fatal: isFatal },
+      { status: isFatal ? 400 : 500 }
+    );
+  }
+}
+```
+
+### Resuming Hooks
+
+```typescript
+import { myHook } from "@/workflows/my-workflow";
+
+export async function POST(request: Request) {
+  const { actorId } = await params;
+  const event = await request.json();
+  
+  const token = `my_actor:${actorId}`;
+  const result = await myHook.resume(token, event);
+  
+  if (!result) {
+    return NextResponse.json(
+      { error: "Actor not found" },
+      { status: 404 }
+    );
+  }
+  
+  return NextResponse.json({ success: true, runId: result.runId });
+}
+```
+
+## TypeScript Best Practices
+
+1. **Type Safety**
+   - Use `defineHook<T>()` for type-safe hooks
+   - Define event types as discriminated unions
+   - Use proper TypeScript types for state interfaces
+
+2. **Type Assertions for AI Gateway**
+   - Plain string model IDs require `as never` type assertion
+   - This is a known limitation - will be fixed in future AI SDK versions
+   - Runtime behavior is correct, types lag behind
+
+3. **Error Types**
+   - Import and use `FatalError` from `"workflow"` for non-retryable errors
+   - Distinguish between retryable and fatal errors
+
+## File Organization
+
+- **Workflows**: `workflows/*.ts` - All workflow definitions
+- **API Routes**: `app/api/*/route.ts` - Next.js API routes
+- **State Store**: `lib/actor-state-store.ts` - State management
+- **Types**: Export from workflow files for reuse
+- **UI**: `app/page.tsx` - React client components
+
+## Documentation References
+
+When implementing features, reference:
+- [Vercel Workflows Documentation](https://vercel.com/docs/workflows)
+- [Hooks & Webhooks Guide](https://vercel.com/docs/workflows/foundations/hooks)
+- [Workflows and Steps Guide](https://vercel.com/docs/workflows/foundations/workflows-and-steps)
+- [Vercel AI Gateway Provider](https://vercel.com/docs/ai-sdk/providers/ai-gateway)
+- [AI SDK + Workflows Integration Guide](./AI_SDK_WORKFLOWS_GUIDE.md)
+- [WORKFLOW_ANALYSIS.md](./WORKFLOW_ANALYSIS.md) - Complete architecture analysis
+
+## Common Pitfalls to Avoid
+
+1. ❌ **Don't** create hooks inside loops - create them outside
+2. ❌ **Don't** forget `globalThis.fetch = fetch` in workflows using AI SDK
+3. ❌ **Don't** initialize state without checking if it exists first
+4. ❌ **Don't** use `createHook()` - use `defineHook<T>()` for type safety
+5. ❌ **Don't** await workflow completion when starting - return `runId` immediately
+6. ❌ **Don't** forget `"use step"` on stateful operations
+7. ❌ **Don't** use provider instances for AI Gateway - use plain strings
+
+## Testing Considerations
+
+- Workflows are durable - test restart scenarios
+- State should persist across workflow restarts
+- Hooks should handle multiple events sequentially
+- AI SDK calls should be retryable
+- Error handling should not break event loop
+
+## Production Readiness Checklist
+
+- [ ] Replace in-memory state store with persistent storage (Redis/Upstash/DB)
+- [ ] Add structured logging
+- [ ] Implement metrics collection
+- [ ] Add workflow run monitoring
+- [ ] Implement actor lifecycle management
+- [ ] Add event validation (Zod schemas)
+- [ ] Set up error alerting
+- [ ] Configure AI Gateway API keys
+- [ ] Add rate limiting for API routes
+- [ ] Implement proper authentication/authorization
+
+## When Adding New Features
+
+1. **New Event Types**: Add to discriminated union type, handle in `computeNewState`
+2. **New AI Operations**: Create step function, include context in prompts
+3. **New State Fields**: Update state interface, handle in state transitions
+4. **New API Endpoints**: Follow existing patterns, use type-safe hooks
+5. **New Workflows**: Follow workflow function template, use proper directives
+
+## Code Style
+
+- Use async/await (no callbacks)
+- Use TypeScript strict mode
+- Prefer explicit types over `any`
+- Use descriptive variable names
+- Add comments for complex logic
+- Follow existing code patterns
+- Keep functions focused and small
+- Use step functions for all I/O operations
+

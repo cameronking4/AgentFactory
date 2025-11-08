@@ -191,7 +191,7 @@ Please provide a helpful response.`;
     const result = await generateText({
       model: 'openai/gpt-4.1' as never, // Uses Vercel AI Gateway automatically (type assertion for v5 compatibility)
       prompt: contextualPrompt,
-      maxTokens: 500,
+      // maxTokens removed - AI SDK v5 handles this differently
     });
 
     return result.text;

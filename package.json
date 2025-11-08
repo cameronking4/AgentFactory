@@ -6,18 +6,30 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "drizzle-kit migrate",
+    "db:push": "drizzle-kit push",
+    "db:studio": "drizzle-kit studio",
+    "test:db": "tsx scripts/test-db.ts",
+    "test:api": "tsx scripts/test-api-routes.ts"
   },
   "dependencies": {
     "@ai-sdk/gateway": "^2.0.7",
     "@ai-sdk/openai": "^2.0.64",
     "@ai-sdk/provider": "^2.0.0",
+    "@neondatabase/serverless": "^1.0.2",
     "ai": "^5.0.89",
+    "date-fns": "^4.1.0",
     "dotenv": "^17.2.3",
+    "drizzle-kit": "^0.31.6",
+    "drizzle-orm": "^0.44.7",
     "next": "16.0.1",
     "react": "19.2.0",
     "react-dom": "19.2.0",
-    "workflow": "4.0.1-beta.6"
+    "redis": "^5.9.0",
+    "workflow": "4.0.1-beta.6",
+    "zod": "^4.1.12"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
@@ -27,6 +39,7 @@
     "eslint": "^9",
     "eslint-config-next": "16.0.1",
     "tailwindcss": "^4",
+    "tsx": "^4.20.6",
     "typescript": "^5"
   }
 }
