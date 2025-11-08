@@ -1,9 +1,9 @@
-import { defineHook, getWorkflowMetadata, fetch } from "workflow";
+import { defineHook, getWorkflowMetadata, fetch, sleep } from "workflow";
 import { generateText } from "ai";
 import { openai } from "@ai-sdk/openai";
 import { db } from "@/lib/db";
 import { employees, tasks, memories, costs } from "@/lib/db/schema";
-import { eq, and, sql } from "drizzle-orm";
+import { eq, and, sql, isNull, inArray } from "drizzle-orm";
 import { trackAICost } from "@/lib/ai/cost-tracking";
 import { start } from "workflow/api";
 import {
@@ -76,34 +76,70 @@ export async function hrWorkflow(initialState: HRState) {
 
   console.log(`[HR ${hrId}] Hook created with token: hr:${hrId}`);
 
-  // Event loop: process events sequentially
-  for await (const event of receiveEvent) {
+  // Main loop: process events and proactively check for pending tasks
+  while (true) {
+    // Proactive: Check for pending tasks that haven't been assigned
     try {
-      console.log(`[HR ${hrId}] Received event:`, event);
-
-      const state = await getHRState(hrId);
-
-      switch (event.type) {
-        case "newTask":
-          await handleNewTask(hrId, event);
-          break;
-        case "hireEmployee":
-          await handleHireEmployee(hrId, event);
-          break;
-        case "getStatus":
-          // Just return current state
-          break;
-      }
-
-      // Update last active
-      const updatedState = await getHRState(hrId);
-      await setHRState(hrId, {
-        ...updatedState,
-        lastActive: new Date().toISOString(),
-      });
+      await checkForPendingTasks(hrId);
     } catch (err) {
-      console.error(`[HR ${hrId}] Error processing event:`, err);
-      // Continue processing events even if one fails
+      console.error(`[HR ${hrId}] Error in checkForPendingTasks:`, err);
+      // Continue loop even if check fails
+    }
+
+    // Proactive: Assign pending tasks to available employees
+    try {
+      await assignTasksToAvailableEmployees(hrId);
+    } catch (err) {
+      console.error(`[HR ${hrId}] Error in assignTasksToAvailableEmployees:`, err);
+      // Continue loop even if check fails
+    }
+
+    // Reactive: Process events with timeout
+    const eventPromise = (async () => {
+      for await (const event of receiveEvent) {
+        return event;
+      }
+    })();
+
+    // Wait for event or timeout (check every 10 seconds)
+    // Use built-in sleep() from workflow package
+    const timeoutPromise = sleep("10s").then(() => ({ type: "timeout" as const }));
+
+    const result = await Promise.race([
+      eventPromise.then((event) => ({ type: "event" as const, event })),
+      timeoutPromise,
+    ]);
+
+    if (result.type === "event") {
+      const event = result.event as HREvent;
+      try {
+        console.log(`[HR ${hrId}] Received event:`, event);
+
+        switch (event.type) {
+          case "newTask":
+            await handleNewTask(hrId, event);
+            break;
+          case "hireEmployee":
+            await handleHireEmployee(hrId, event);
+            break;
+          case "getStatus":
+            // Just return current state
+            break;
+        }
+
+        // Update last active
+        const updatedState = await getHRState(hrId);
+        if (updatedState) {
+          await setHRState(hrId, {
+            ...updatedState,
+            hrId, // Ensure hrId is always set
+            lastActive: new Date().toISOString(),
+          });
+        }
+      } catch (err) {
+        console.error(`[HR ${hrId}] Error processing event:`, err);
+        // Continue processing events even if one fails
+      }
     }
   }
 }
@@ -161,11 +197,16 @@ async function handleNewTask(hrId: string, event: { taskId: string; taskTitle: s
 
   // Update state
   const state = await getHRState(hrId);
+  if (!state) {
+    console.error(`[HR ${hrId}] State not found when updating after task assignment`);
+    return;
+  }
   const newlyHired = assignedEmployeeIds.filter(
     (id) => !state.hiredEmployees.includes(id)
   );
   await setHRState(hrId, {
     ...state,
+    hrId, // Ensure hrId is always set
     activeTasks: [...state.activeTasks, event.taskId],
     hiredEmployees: [...new Set([...state.hiredEmployees, ...assignedEmployeeIds])],
   });
@@ -174,6 +215,50 @@ async function handleNewTask(hrId: string, event: { taskId: string; taskTitle: s
   console.log(
     `[HR ${hrId}] Task ${event.taskId} processed. Assigned ${assignedEmployeeIds.length} ICs (${reusedCount} reused, ${newlyHired.length} newly hired).`
   );
+}
+
+/**
+ * Proactively checks for pending tasks that haven't been assigned
+ */
+async function checkForPendingTasks(hrId: string) {
+  "use step";
+
+  try {
+    const state = await getHRState(hrId);
+    if (!state) return;
+
+    // Get all pending tasks that haven't been assigned to anyone
+    const pendingTasks = await db
+      .select()
+      .from(tasks)
+      .where(
+        and(
+          eq(tasks.status, "pending"),
+          sql`${tasks.assignedTo} IS NULL`
+        )
+      );
+
+    // Process each pending task
+    for (const task of pendingTasks) {
+      // Skip if already in activeTasks (being processed)
+      if (state.activeTasks.includes(task.id)) {
+        continue;
+      }
+
+      console.log(
+        `[HR ${hrId}] Found pending task ${task.id} - ${task.title}. Processing...`
+      );
+
+      // Process the task using the same logic as handleNewTask
+      await handleNewTask(hrId, {
+        taskId: task.id,
+        taskTitle: task.title,
+        taskDescription: task.description || "",
+      });
+    }
+  } catch (error) {
+    console.error(`[HR ${hrId}] Error checking for pending tasks:`, error);
+  }
 }
 
 /**
@@ -216,7 +301,7 @@ Respond in JSON format with this structure:
       if (process.env.OPENAI_API_KEY) {
         modelUsed = "gpt-4o";
         result = await generateText({
-          model: openai('gpt-4o'),
+          model: openai('gpt-4o') as never,
           prompt,
         });
       } else {
@@ -346,7 +431,7 @@ async function evaluateICAssignment(
     for (const ic of allICs) {
       // Calculate skill match score
       const matchingSkills = requiredSkills.filter((reqSkill) =>
-        ic.skills.some((icSkill) =>
+        ic.skills.some((icSkill: string) =>
           icSkill.toLowerCase().includes(reqSkill.toLowerCase()) ||
           reqSkill.toLowerCase().includes(icSkill.toLowerCase())
         )
@@ -490,7 +575,7 @@ Respond in JSON format:
       if (process.env.OPENAI_API_KEY) {
         modelUsed = "gpt-4o";
         result = await generateText({
-          model: openai('gpt-4o'),
+          model: openai('gpt-4o') as never,
           prompt,
         });
       } else {
@@ -615,7 +700,7 @@ async function createManager(hrId: string): Promise<string> {
     const name = `Manager ${managerNumber}`;
 
     // Create manager employee record
-    const [manager] = await db
+    const managerResult = await db
       .insert(employees)
       .values({
         name: name,
@@ -624,14 +709,20 @@ async function createManager(hrId: string): Promise<string> {
         status: "active",
       })
       .returning();
+    
+    const manager = Array.isArray(managerResult) ? managerResult[0] : managerResult;
 
     console.log(`[HR ${hrId}] Created new manager: ${manager.id} (${manager.name})`);
 
-    // Start manager workflow
-    const initialState = createInitialManagerState(manager.id, manager.name);
-    await start(managerWorkflow, [initialState]);
-
-    console.log(`[HR ${hrId}] Started manager workflow for ${manager.id}`);
+    // Start manager workflow directly
+    try {
+      const initialState = createInitialManagerState(manager.id, manager.name);
+      const result = await start(managerWorkflow, [initialState]);
+      console.log(`[HR ${hrId}] Started manager workflow for ${manager.id}: ${result.runId}`);
+    } catch (workflowError) {
+      console.error(`[HR ${hrId}] Error starting manager workflow:`, workflowError);
+      // Continue - workflow can be started manually later
+    }
 
     return manager.id;
   } catch (error) {
@@ -762,7 +853,7 @@ async function hireIC(hrId: string, requirement: ICRequirement): Promise<string 
     const managerId = await findOrAssignManager(hrId);
 
     // Create employee record in database with manager assignment
-    const [employee] = await db
+    const employeeResult = await db
       .insert(employees)
       .values({
         name: name,
@@ -772,6 +863,8 @@ async function hireIC(hrId: string, requirement: ICRequirement): Promise<string 
         managerId: managerId,
       })
       .returning();
+    
+    const employee = Array.isArray(employeeResult) ? employeeResult[0] : employeeResult;
 
     console.log(
       `[HR ${hrId}] Hired new employee: ${employee.id} (${employee.name}) with manager ${managerId}`
@@ -788,7 +881,7 @@ async function hireIC(hrId: string, requirement: ICRequirement): Promise<string 
       console.warn(`[HR ${hrId}] Could not notify manager workflow:`, hookError);
     }
 
-    // Start IC workflow
+    // Start IC workflow directly
     try {
       const initialState = createInitialICState(
         employee.id,
@@ -796,8 +889,8 @@ async function hireIC(hrId: string, requirement: ICRequirement): Promise<string 
         requirement.skills,
         managerId
       );
-      await start(icEmployeeWorkflow, [initialState]);
-      console.log(`[HR ${hrId}] Started IC workflow for ${employee.id}`);
+      const result = await start(icEmployeeWorkflow, [initialState]);
+      console.log(`[HR ${hrId}] Started IC workflow for ${employee.id}: ${result.runId}`);
     } catch (workflowError) {
       console.error(
         `[HR ${hrId}] Error starting IC workflow:`,
@@ -805,6 +898,9 @@ async function hireIC(hrId: string, requirement: ICRequirement): Promise<string 
       );
       // Continue even if workflow start fails - IC can be started manually later
     }
+
+    // Assign new IC to any pending tasks that match their skills
+    await assignNewEmployeeToPendingTasks(hrId, employee.id, requirement.skills);
 
     return employee.id;
   } catch (error) {
@@ -862,6 +958,193 @@ async function assignTaskToICs(taskId: string, employeeIds: string[]) {
 }
 
 /**
+ * Assigns pending tasks to available employees (those with no current tasks)
+ * Respects manager-IC relationships
+ */
+async function assignTasksToAvailableEmployees(hrId: string) {
+  "use step";
+
+  try {
+    // Get all pending tasks that haven't been assigned
+    const pendingTasks = await db
+      .select()
+      .from(tasks)
+      .where(
+        and(
+          eq(tasks.status, "pending"),
+          isNull(tasks.assignedTo)
+        )
+      )
+      .limit(10); // Limit to avoid overwhelming
+
+    if (pendingTasks.length === 0) {
+      return; // No pending tasks
+    }
+
+    // Get all active IC employees with their names
+    const allICs = await db
+      .select({
+        id: employees.id,
+        name: employees.name,
+        managerId: employees.managerId,
+      })
+      .from(employees)
+      .where(
+        and(
+          eq(employees.role, "ic"),
+          eq(employees.status, "active")
+        )
+      );
+
+    if (allICs.length === 0) {
+      return; // No ICs available
+    }
+
+    // For each pending task, find an available employee
+    for (const task of pendingTasks) {
+      // Find available employees (those with no current tasks or all tasks completed)
+      const availableEmployees = await findAvailableEmployees(allICs);
+
+      if (availableEmployees.length === 0) {
+        console.log(`[HR ${hrId}] No available employees for task ${task.id}`);
+        continue;
+      }
+
+      // Assign to first available employee
+      // In the future, could match by skills or manager
+      const employee = availableEmployees[0];
+
+      console.log(`[HR ${hrId}] Assigning pending task ${task.id} to available employee ${employee.id} (${employee.name})`);
+
+      // Update task assignment
+      await db
+        .update(tasks)
+        .set({
+          assignedTo: employee.id,
+          status: "in-progress",
+          updatedAt: new Date(),
+        })
+        .where(eq(tasks.id, task.id));
+
+      // Notify IC workflow about the new task
+      try {
+        await icTaskHook.resume(`ic:${employee.id}:tasks`, {
+          type: "newTask",
+          taskId: task.id,
+        });
+        console.log(`[HR ${hrId}] Notified IC ${employee.id} about assigned task ${task.id}`);
+      } catch (hookError) {
+        console.warn(
+          `[HR ${hrId}] Could not notify IC ${employee.id} via hook:`,
+          hookError
+        );
+        // Task is still assigned in DB, IC will pick it up proactively
+      }
+    }
+  } catch (error) {
+    console.error(`[HR ${hrId}] Error assigning tasks to available employees:`, error);
+    // Don't throw - this is a proactive optimization
+  }
+}
+
+/**
+ * Finds employees that have no current tasks or all tasks completed
+ */
+async function findAvailableEmployees(employees: Array<{ id: string; name: string; managerId: string | null }>): Promise<Array<{ id: string; name: string; managerId: string | null }>> {
+  "use step";
+
+  if (employees.length === 0) {
+    return [];
+  }
+
+  // Get all employee IDs
+  const employeeIds = employees.map((e) => e.id);
+
+  // Get all in-progress tasks for these employees in one query
+  const inProgressTasks = await db
+    .select()
+    .from(tasks)
+    .where(
+      and(
+        eq(tasks.status, "in-progress"),
+        inArray(tasks.assignedTo, employeeIds)
+      )
+    );
+
+  // Create a set of employee IDs that have in-progress tasks
+  const busyEmployeeIds = new Set(inProgressTasks.map((t) => t.assignedTo).filter((id): id is string => id !== null));
+
+  // Filter employees to only those without in-progress tasks
+  const available = employees.filter((emp) => !busyEmployeeIds.has(emp.id));
+
+  return available;
+}
+
+/**
+ * Assigns a new employee to any pending tasks that match their skills
+ */
+async function assignNewEmployeeToPendingTasks(
+  hrId: string,
+  employeeId: string,
+  _skills: string[] // Reserved for future skill-based task matching
+) {
+  "use step";
+
+  try {
+    // Find pending tasks that haven't been assigned yet
+    const pendingTasks = await db
+      .select()
+      .from(tasks)
+      .where(
+        and(
+          eq(tasks.status, "pending"),
+          isNull(tasks.assignedTo)
+        )
+      )
+      .limit(5); // Limit to 5 tasks to avoid overwhelming new employee
+
+    if (pendingTasks.length === 0) {
+      console.log(`[HR ${hrId}] No pending tasks to assign to new employee ${employeeId}`);
+      return;
+    }
+
+    // For each pending task, check if it matches the employee's skills
+    // For now, assign the first pending task (can be enhanced with skill matching)
+    const taskToAssign = pendingTasks[0];
+
+    console.log(`[HR ${hrId}] Assigning pending task ${taskToAssign.id} to new employee ${employeeId}`);
+
+    // Update task assignment
+    await db
+      .update(tasks)
+      .set({
+        assignedTo: employeeId,
+        status: "in-progress",
+        updatedAt: new Date(),
+      })
+      .where(eq(tasks.id, taskToAssign.id));
+
+    // Notify IC workflow about the new task
+    try {
+      await icTaskHook.resume(`ic:${employeeId}:tasks`, {
+        type: "newTask",
+        taskId: taskToAssign.id,
+      });
+      console.log(`[HR ${hrId}] Notified IC ${employeeId} about assigned task ${taskToAssign.id}`);
+    } catch (hookError) {
+      console.warn(
+        `[HR ${hrId}] Could not notify IC ${employeeId} via hook:`,
+        hookError
+      );
+      // Task is still assigned in DB, IC will pick it up proactively
+    }
+  } catch (error) {
+    console.error(`[HR ${hrId}] Error assigning pending tasks to new employee:`, error);
+    // Don't throw - this is a nice-to-have feature
+  }
+}
+
+/**
  * Handles manual employee hiring request
  */
 async function handleHireEmployee(
@@ -875,10 +1158,13 @@ async function handleHireEmployee(
       // Create manager directly
       const managerId = await createManager(hrId);
       const state = await getHRState(hrId);
-      await setHRState(hrId, {
-        ...state,
-        hiredEmployees: [...state.hiredEmployees, managerId],
-      });
+      if (state) {
+        await setHRState(hrId, {
+          ...state,
+          hrId, // Ensure hrId is always set
+          hiredEmployees: [...state.hiredEmployees, managerId],
+        });
+      }
       console.log(`[HR ${hrId}] Created manager ${managerId} via manual hire request`);
     } else {
       // Create IC with manager assignment
@@ -891,10 +1177,13 @@ async function handleHireEmployee(
       const employeeId = await hireIC(hrId, requirement);
       if (employeeId) {
         const state = await getHRState(hrId);
-        await setHRState(hrId, {
-          ...state,
-          hiredEmployees: [...state.hiredEmployees, employeeId],
-        });
+        if (state) {
+          await setHRState(hrId, {
+            ...state,
+            hrId, // Ensure hrId is always set
+            hiredEmployees: [...state.hiredEmployees, employeeId],
+          });
+        }
         console.log(`[HR ${hrId}] Created IC ${employeeId} via manual hire request`);
       }
     }

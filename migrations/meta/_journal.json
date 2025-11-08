@@ -15,6 +15,13 @@
       "when": 1762588418735,
       "tag": "0001_colossal_orphan",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1762597734274,
+      "tag": "0002_adorable_the_anarchist",
+      "breakpoints": true
     }
   ]
 }

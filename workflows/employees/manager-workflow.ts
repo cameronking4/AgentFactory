@@ -1,8 +1,8 @@
-import { defineHook, getWorkflowMetadata, fetch } from "workflow";
+import { defineHook, getWorkflowMetadata, fetch, sleep } from "workflow";
 import { generateText } from "ai";
 import { db } from "@/lib/db";
 import { employees, tasks, deliverables, memories } from "@/lib/db/schema";
-import { eq, and, sql, desc } from "drizzle-orm";
+import { eq, and, desc, inArray, isNull } from "drizzle-orm";
 import { icTaskHook } from "@/workflows/employees/ic-workflow";
 import { trackAICost } from "@/lib/ai/cost-tracking";
 import "dotenv/config";
@@ -26,6 +26,7 @@ export type ManagerEvent =
   | { type: "markReviewed"; taskId: string } // Manually mark task as reviewed
   | { type: "assignIC"; icId: string } // Assign an IC to this manager
   | { type: "unassignIC"; icId: string } // Unassign an IC from this manager
+  | { type: "requestWork"; icId: string } // IC is requesting more work
   | { type: "getStatus" };
 
 // Define hooks for type safety
@@ -82,36 +83,38 @@ export async function managerWorkflow(initialState: ManagerState) {
     // Proactive: Check for completed tasks from direct reports that need review
     await checkForCompletedTasks(managerId);
 
+    // Proactive: Assign pending tasks to available ICs
+    await assignPendingTasksToICs(managerId);
+
     // Proactive: Build memory from evaluations and feedback
     await buildManagerMemory(managerId);
 
     // Reactive: Process evaluation requests
     const eventPromise = (async () => {
-      for await (const event of receiveEvaluation) {
+  for await (const event of receiveEvaluation) {
         return event;
       }
     })();
 
     // Wait for event or timeout (check every 10 seconds)
+    const timeoutPromise = sleep("10s").then(() => ({ type: "timeout" as const }));
     const result = await Promise.race([
-      eventPromise,
-      new Promise<{ type: "timeout" }>((resolve) =>
-        setTimeout(() => resolve({ type: "timeout" }), 10000)
-      ),
+      eventPromise.then((event) => ({ type: "event" as const, event })),
+      timeoutPromise,
     ]);
 
-    if (result && result.type !== "timeout") {
-      const event = result as ManagerEvent;
-      try {
-        console.log(`[Manager ${managerId}] Received event:`, event);
+    if (result.type === "event") {
+      const event = result.event as ManagerEvent;
+    try {
+      console.log(`[Manager ${managerId}] Received event:`, event);
 
-        switch (event.type) {
-          case "evaluateDeliverable":
-            await handleEvaluateDeliverable(managerId, event.deliverableId, event.taskId);
-            break;
-          case "evaluateTask":
-            await handleEvaluateTask(managerId, event.taskId);
-            break;
+      switch (event.type) {
+        case "evaluateDeliverable":
+          await handleEvaluateDeliverable(managerId, event.deliverableId, event.taskId);
+          break;
+        case "evaluateTask":
+          await handleEvaluateTask(managerId, event.taskId);
+          break;
           case "requestRevision":
             await handleRequestRevision(managerId, event.taskId, event.deliverableId, event.feedback);
             break;
@@ -124,14 +127,17 @@ export async function managerWorkflow(initialState: ManagerState) {
           case "unassignIC":
             await handleUnassignIC(managerId, event.icId);
             break;
-          case "getStatus":
-            // Just return current state
+          case "requestWork":
+            await handleRequestWork(managerId, event.icId);
             break;
-        }
-      } catch (err) {
-        console.error(`[Manager ${managerId}] Error processing event:`, err);
-        // Continue processing events even if one fails
+        case "getStatus":
+          // Just return current state
+          break;
       }
+    } catch (err) {
+      console.error(`[Manager ${managerId}] Error processing event:`, err);
+      // Continue processing events even if one fails
+    }
     }
   }
 }
@@ -147,6 +153,7 @@ async function checkForCompletedTasks(managerId: string) {
     if (!state || state.directReports.length === 0) return;
 
     // Get all completed tasks from direct reports that haven't been reviewed
+    // Use inArray for proper Drizzle ORM syntax
     const completedTasks = await db
       .select()
       .from(tasks)
@@ -154,7 +161,7 @@ async function checkForCompletedTasks(managerId: string) {
         and(
           eq(tasks.status, "completed"),
           // Tasks assigned to direct reports
-          sql`${tasks.assignedTo} = ANY(${state.directReports})`
+          inArray(tasks.assignedTo, state.directReports)
         )
       );
 
@@ -593,6 +600,135 @@ async function handleUnassignIC(managerId: string, icId: string) {
   }
 }
 
+/**
+ * Handles IC request for more work
+ */
+async function handleRequestWork(managerId: string, icId: string) {
+  "use step";
+
+  console.log(`[Manager ${managerId}] IC ${icId} requested work`);
+
+  try {
+    // Find pending tasks that can be assigned to this IC
+    const pendingTasks = await db
+      .select()
+      .from(tasks)
+      .where(
+        and(
+          eq(tasks.status, "pending"),
+          isNull(tasks.assignedTo)
+        )
+      )
+      .limit(1);
+
+    if (pendingTasks.length > 0) {
+      const task = pendingTasks[0];
+      // Assign task to IC
+      await db
+        .update(tasks)
+        .set({
+          assignedTo: icId,
+          status: "in-progress",
+          updatedAt: new Date(),
+        })
+        .where(eq(tasks.id, task.id));
+
+      // Notify IC about the new task
+      try {
+        await icTaskHook.resume(`ic:${icId}:tasks`, {
+          type: "newTask",
+          taskId: task.id,
+        });
+        console.log(`[Manager ${managerId}] Assigned task ${task.id} to IC ${icId}`);
+      } catch (hookError) {
+        console.warn(`[Manager ${managerId}] Could not notify IC:`, hookError);
+      }
+    } else {
+      console.log(`[Manager ${managerId}] No pending tasks available for IC ${icId}`);
+      // Could create a new task here if needed
+    }
+  } catch (error) {
+    console.error(`[Manager ${managerId}] Error handling work request:`, error);
+  }
+}
+
+/**
+ * Assigns pending tasks to available ICs under this manager
+ */
+async function assignPendingTasksToICs(managerId: string) {
+  "use step";
+
+  try {
+    const state = await getManagerState(managerId);
+    if (!state || state.directReports.length === 0) return;
+
+    // Only check occasionally (not every loop) - 10% chance per loop
+    if (Math.random() > 0.1) return;
+
+    // Get pending tasks without assignments
+    const pendingTasks = await db
+      .select()
+      .from(tasks)
+      .where(
+        and(
+          eq(tasks.status, "pending"),
+          isNull(tasks.assignedTo)
+        )
+      )
+      .limit(5);
+
+    if (pendingTasks.length === 0) return;
+
+    // For each pending task, find an available IC
+    for (const task of pendingTasks) {
+      // Find available ICs (those with no in-progress tasks)
+      const availableICs: string[] = [];
+
+      for (const icId of state.directReports) {
+        const icTasks = await db
+          .select()
+          .from(tasks)
+          .where(
+            and(
+              eq(tasks.assignedTo, icId),
+              eq(tasks.status, "in-progress")
+            )
+          );
+
+        if (icTasks.length === 0) {
+          availableICs.push(icId);
+        }
+      }
+
+      if (availableICs.length > 0) {
+        // Assign to first available IC
+        const assignedIC = availableICs[0];
+        await db
+          .update(tasks)
+          .set({
+            assignedTo: assignedIC,
+            status: "in-progress",
+            updatedAt: new Date(),
+          })
+          .where(eq(tasks.id, task.id));
+
+        // Notify IC
+        try {
+          await icTaskHook.resume(`ic:${assignedIC}:tasks`, {
+            type: "newTask",
+            taskId: task.id,
+          });
+          console.log(`[Manager ${managerId}] Assigned pending task ${task.id} to IC ${assignedIC}`);
+        } catch (hookError) {
+          console.warn(`[Manager ${managerId}] Could not notify IC:`, hookError);
+        }
+      }
+    }
+  } catch (error) {
+    console.error(`[Manager ${managerId}] Error assigning pending tasks:`, error);
+  }
+}
+
 // State management functions
 async function getManagerState(managerId: string): Promise<ManagerState | null> {
   "use step";
@@ -617,7 +753,7 @@ async function getManagerState(managerId: string): Promise<ManagerState | null> 
 
     // Get direct reports (employees with this manager as managerId)
     const directReportEmployees = await db
-      .select()
+        .select()
       .from(employees)
       .where(eq(employees.managerId, managerId));
     

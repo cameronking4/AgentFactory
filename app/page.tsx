@@ -150,9 +150,16 @@ export default function CEODashboard() {
   // Auto-refresh
   const [autoRefresh, setAutoRefresh] = useState(true);
 
-  // Initialize HR workflow on mount
+  // Initialize HR workflow on mount (only if not already set)
   useEffect(() => {
     const initHR = async () => {
+      // Check localStorage for existing HR ID first
+      const storedHrId = localStorage.getItem("hrWorkflowId");
+      if (storedHrId) {
+        setHrId(storedHrId);
+        return; // Don't start a new workflow if one exists
+      }
+
       try {
         const response = await fetch("/api/hr", {
           method: "POST",
@@ -162,9 +169,12 @@ export default function CEODashboard() {
         const data = await response.json();
         if (data.success && data.hrId) {
           setHrId(data.hrId);
+          localStorage.setItem("hrWorkflowId", data.hrId);
         }
       } catch (err) {
         console.error("Error initializing HR:", err);
+        // If error (like 503), the workflow might already be running
+        // Just use the stored ID if available
       }
     };
     initHR();
@@ -286,6 +296,7 @@ export default function CEODashboard() {
     setSuccess(null);
 
     try {
+      // 1. Create task in database
       const response = await fetch("/api/tasks", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -297,20 +308,39 @@ export default function CEODashboard() {
       });
 
       const data = await response.json();
-      if (data.success) {
-        setSuccess("Task created and assigned to HR!");
-        setTaskTitle("");
-        setTaskDescription("");
-        // Refresh tasks
-        const tasksRes = await fetch("/api/tasks");
-        if (tasksRes.ok) {
-          const tasksData = await tasksRes.json();
-          if (tasksData.success) {
-            setTasks(tasksData.tasks || []);
-          }
-        }
-      } else {
+      if (!data.success || !data.id) {
         setError(data.error || "Failed to create task");
+        return;
+      }
+
+      // 2. Notify HR workflow about the new task
+      const hrResponse = await fetch(`/api/hr/${hrId}/task`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          taskId: data.id,
+          taskTitle: taskTitle,
+          taskDescription: taskDescription,
+        }),
+      });
+
+      const hrData = await hrResponse.json();
+      if (!hrData.success) {
+        console.warn("Task created but HR notification failed:", hrData.error);
+        setError("Task created but failed to notify HR. Task may remain pending.");
+        return;
+      }
+
+      setSuccess("Task created and assigned to HR!");
+      setTaskTitle("");
+      setTaskDescription("");
+      // Refresh tasks
+      const tasksRes = await fetch("/api/tasks");
+      if (tasksRes.ok) {
+        const tasksData = await tasksRes.json();
+        if (tasksData.success) {
+          setTasks(tasksData.tasks || []);
+        }
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unknown error");
@@ -370,7 +400,7 @@ export default function CEODashboard() {
           <p className="text-lg">AI Agent Factory - Monitor and manage your autonomous workforce</p>
           {hrId && (
             <p className="text-sm mt-1">
-              HR Workflow: <code className="px-2 py-1 rounded border">{hrId.slice(0, 20)}...</code>
+              Agent Resources Workflow: <code className="px-2 py-1 rounded border">{hrId.slice(0, 20)}...</code>
             </p>
           )}
         </div>
@@ -414,13 +444,13 @@ export default function CEODashboard() {
                 disabled={loading || !hrId || !taskTitle.trim() || !taskDescription.trim()}
                 className="px-6 py-3 rounded-lg border shadow font-medium disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                {loading ? "Creating Task..." : "Create Task & Assign to HR"}
+                {loading ? "Creating Task..." : "Create Task & Assign to AR (Agent Resources)"}
               </button>
               <button
                 onClick={clearDatabase}
                 className="px-6 py-3 rounded-lg border shadow font-medium"
               >
-                Clear Database
+                Layoffs (Clear Database)
               </button>
             </div>
           </div>

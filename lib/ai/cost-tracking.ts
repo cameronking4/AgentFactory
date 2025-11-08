@@ -14,7 +14,8 @@ function estimateCost(
   // Default pricing (adjust based on actual model pricing)
   // These are approximate prices per 1M tokens
   const pricing: Record<string, { prompt: number; completion: number }> = {
-    "gpt-4.1": { prompt: 30.0, completion: 60.0 }, // GPT-4 Turbo pricing
+    "gpt-4.1": { prompt: 10.0, completion: 30.0 }, // GPT-4.1 via AI Gateway (estimated)
+    "openai/gpt-4.1": { prompt: 10.0, completion: 30.0 }, // AI Gateway format
     "gpt-4o": { prompt: 5.0, completion: 15.0 },
     "gpt-4o-mini": { prompt: 0.15, completion: 0.6 },
     "gpt-4": { prompt: 30.0, completion: 60.0 },
@@ -22,8 +23,8 @@ function estimateCost(
   };
 
   // Extract model name (handle "openai/gpt-4.1" format)
-  const modelName = model.includes("/") ? model.split("/")[1] : model;
-  const modelPricing = pricing[modelName] || pricing["gpt-4o"]; // Default to gpt-4o
+  // Try full model string first, then extract name
+  const modelPricing = pricing[model] || pricing[model.includes("/") ? model.split("/")[1] : model] || pricing["gpt-4o"];
 
   const promptCost = (promptTokens / 1_000_000) * modelPricing.prompt;
   const completionCost = (completionTokens / 1_000_000) * modelPricing.completion;
@@ -57,8 +58,18 @@ export async function trackAICost(
     const completionTokens = usage.completionTokens || 0;
     const totalTokens = usage.totalTokens || promptTokens + completionTokens;
 
+    // If we only have totalTokens, estimate split (typically 70% prompt, 30% completion)
+    let estimatedPromptTokens = promptTokens;
+    let estimatedCompletionTokens = completionTokens;
+    
+    if (totalTokens > 0 && promptTokens === 0 && completionTokens === 0) {
+      // Estimate: assume 70% prompt, 30% completion (typical for most AI tasks)
+      estimatedPromptTokens = Math.floor(totalTokens * 0.7);
+      estimatedCompletionTokens = totalTokens - estimatedPromptTokens;
+    }
+
     // Estimate cost
-    const cost = estimateCost(options.model, promptTokens, completionTokens);
+    const cost = estimateCost(options.model, estimatedPromptTokens, estimatedCompletionTokens);
 
     // Store cost record
     await db.insert(costs).values({
@@ -67,8 +78,8 @@ export async function trackAICost(
       type: "api", // API call cost
       amount: cost.toFixed(2),
       currency: "USD",
-      promptTokens,
-      completionTokens,
+      promptTokens: estimatedPromptTokens,
+      completionTokens: estimatedCompletionTokens,
       totalTokens,
     });
 

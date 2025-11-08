@@ -1,10 +1,10 @@
-import { defineHook, getWorkflowMetadata, fetch } from "workflow";
+import { defineHook, getWorkflowMetadata, fetch, sleep } from "workflow";
 import { generateText } from "ai";
 import { db } from "@/lib/db";
 import { employees, tasks, deliverables, memories } from "@/lib/db/schema";
 import { eq, and, sql, or } from "drizzle-orm";
 import { icMeetingHook, icPingHook } from "@/workflows/shared/hooks";
-import { managerEvaluationHook } from "@/workflows/employees/manager-workflow";
+import { managerEvaluationHook, type ManagerEvent } from "@/workflows/employees/manager-workflow";
 import { trackAICost } from "@/lib/ai/cost-tracking";
 import "dotenv/config";
 
@@ -117,6 +117,9 @@ export async function icEmployeeWorkflow(initialState: ICState) {
     // Proactive: Execute current tasks autonomously
     await executeCurrentTasks(employeeId);
 
+    // Proactive: Request work from manager if no current tasks
+    await requestWorkFromManager(employeeId);
+
     // Proactive: Help peers with blockers
     await checkAndHelpPeers(employeeId);
 
@@ -153,13 +156,14 @@ export async function icEmployeeWorkflow(initialState: ICState) {
       | { type: "ping"; ping: import("@/workflows/shared/hooks").ICPingEvent }
       | { type: "timeout" };
 
+    // Use built-in sleep() from workflow package
+    const timeoutPromise = sleep("5s").then(() => ({ type: "timeout" as const }));
+
     const result = (await Promise.race([
       taskEventPromise.then((event) => ({ type: "task" as const, event })),
       meetingEventPromise.then((meeting) => ({ type: "meeting" as const, meeting })),
       pingEventPromise.then((ping) => ({ type: "ping" as const, ping })),
-      new Promise<{ type: "timeout" }>((resolve) =>
-        setTimeout(() => resolve({ type: "timeout" }), 5000)
-      ),
+      timeoutPromise,
     ])) as ReactiveEventResult;
 
     // Process the event if one was received
@@ -509,6 +513,52 @@ async function checkForNewTasks(employeeId: string) {
     }
   } catch (error) {
     console.error(`[IC ${employeeId}] Error checking for new tasks:`, error);
+  }
+}
+
+/**
+ * Requests work from manager if IC has no current tasks
+ */
+async function requestWorkFromManager(employeeId: string) {
+  "use step";
+
+  try {
+    const state = await getICState(employeeId);
+    if (!state || !state.managerId) return;
+
+    // Only check occasionally (not every loop) - 5% chance per loop
+    if (Math.random() > 0.05) return;
+
+    // Check if IC has any current tasks
+    if (state.currentTasks.length > 0) return; // Already has work
+
+    // Check database for any pending/in-progress tasks assigned to this IC
+    const assignedTasks = await db
+      .select()
+      .from(tasks)
+      .where(
+        and(
+          eq(tasks.assignedTo, employeeId),
+          or(eq(tasks.status, "pending"), eq(tasks.status, "in-progress"))
+        )
+      );
+
+    if (assignedTasks.length > 0) return; // Has tasks in DB, will be picked up by checkForNewTasks
+
+    // No current tasks - request work from manager
+    console.log(`[IC ${employeeId}] No current tasks, requesting work from manager ${state.managerId}`);
+
+    try {
+      await managerEvaluationHook.resume(`manager:${state.managerId}`, {
+        type: "requestWork",
+        icId: employeeId,
+      });
+    } catch (hookError) {
+      // Manager workflow might not be running, that's okay
+      console.warn(`[IC ${employeeId}] Could not request work from manager:`, hookError);
+    }
+  } catch (error) {
+    console.error(`[IC ${employeeId}] Error requesting work from manager:`, error);
   }
 }
 
