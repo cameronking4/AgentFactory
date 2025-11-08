@@ -6,13 +6,15 @@ interface CounterState {
   count: number;
   lastUpdated: string;
   history: Array<{ timestamp: string; action: string; count: number }>;
+  aiResponse?: string;
 }
 
 type CounterEvent =
   | { type: "increment"; amount?: number }
   | { type: "decrement"; amount?: number }
   | { type: "reset" }
-  | { type: "getState" };
+  | { type: "getState" }
+  | { type: "generateText"; prompt: string };
 
 export default function Home() {
   const [actorId, setActorId] = useState<string | null>(null);
@@ -23,6 +25,8 @@ export default function Home() {
   const [loadingState, setLoadingState] = useState(false);
   const [copied, setCopied] = useState(false);
   const [reconnectId, setReconnectId] = useState<string>("");
+  const [aiPrompt, setAiPrompt] = useState<string>("");
+  const [generatingText, setGeneratingText] = useState(false);
 
   // Poll for state updates when we have an actorId
   useEffect(() => {
@@ -183,6 +187,8 @@ export default function Home() {
           ? `Decremented by ${event.amount ?? 1}`
           : event.type === "reset"
           ? "Reset"
+          : event.type === "generateText"
+          ? "Generating AI text..."
           : "Get state";
 
       setStatus(`Event sent: ${eventDescription}`);
@@ -193,6 +199,8 @@ export default function Home() {
       }, 2000);
 
       // Wait a bit for the workflow to process, then fetch state
+      // For AI generation, wait longer as it takes more time
+      const waitTime = event.type === "generateText" ? 2000 : 300;
       setTimeout(async () => {
         try {
           const stateResponse = await fetch(`/api/actor/${actorId}/state`);
@@ -205,9 +213,39 @@ export default function Home() {
         } catch (err) {
           // Silently fail
         }
-      }, 300);
+      }, waitTime);
+      
+      // For AI generation, also poll more frequently until we get a response
+      if (event.type === "generateText") {
+        setGeneratingText(true);
+        const pollInterval = setInterval(async () => {
+          try {
+            const stateResponse = await fetch(`/api/actor/${actorId}/state`);
+            if (stateResponse.ok) {
+              const stateData = await stateResponse.json();
+              if (stateData.success && stateData.state) {
+                setState(stateData.state);
+                // Stop polling once we have an AI response
+                if (stateData.state.aiResponse) {
+                  setGeneratingText(false);
+                  clearInterval(pollInterval);
+                }
+              }
+            }
+          } catch (err) {
+            // Silently fail
+          }
+        }, 500);
+        
+        // Stop polling after 30 seconds max
+        setTimeout(() => {
+          clearInterval(pollInterval);
+          setGeneratingText(false);
+        }, 30000);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unknown error");
+      setGeneratingText(false);
     } finally {
       setLoading(false);
     }
@@ -369,8 +407,18 @@ export default function Home() {
                         {new Date(state.lastUpdated).toLocaleTimeString()}
                       </div>
                     </div>
+                    {state.aiResponse && (
+                      <div className="mt-4 p-4 rounded-lg bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800">
+                        <h3 className="text-sm font-semibold text-blue-900 dark:text-blue-100 mb-2">
+                          AI Response
+                        </h3>
+                        <p className="text-sm text-blue-800 dark:text-blue-200 whitespace-pre-wrap">
+                          {state.aiResponse}
+                        </p>
+                      </div>
+                    )}
                     {state.history.length > 0 && (
-                      <div>
+                      <div className="mt-4">
                         <h3 className="text-sm font-semibold text-zinc-700 dark:text-zinc-300 mb-2">
                           Recent History
                         </h3>
@@ -416,7 +464,7 @@ export default function Home() {
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
                   <button
                     onClick={() => sendEvent({ type: "increment", amount: 1 })}
-                    disabled={loading}
+                    disabled={loading || generatingText}
                     className="px-4 py-2 rounded-lg bg-green-600 text-white font-medium hover:bg-green-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors min-h-[44px]"
                   >
                     {loading ? (
@@ -427,7 +475,7 @@ export default function Home() {
                   </button>
                   <button
                     onClick={() => sendEvent({ type: "increment", amount: 5 })}
-                    disabled={loading}
+                    disabled={loading || generatingText}
                     className="px-4 py-2 rounded-lg bg-green-600 text-white font-medium hover:bg-green-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors min-h-[44px]"
                   >
                     {loading ? (
@@ -438,7 +486,7 @@ export default function Home() {
                   </button>
                   <button
                     onClick={() => sendEvent({ type: "decrement", amount: 1 })}
-                    disabled={loading}
+                    disabled={loading || generatingText}
                     className="px-4 py-2 rounded-lg bg-red-600 text-white font-medium hover:bg-red-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors min-h-[44px]"
                   >
                     {loading ? (
@@ -449,7 +497,7 @@ export default function Home() {
                   </button>
                   <button
                     onClick={() => sendEvent({ type: "reset" })}
-                    disabled={loading}
+                    disabled={loading || generatingText}
                     className="px-4 py-2 rounded-lg bg-yellow-600 text-white font-medium hover:bg-yellow-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors min-h-[44px]"
                   >
                     {loading ? (
@@ -458,6 +506,53 @@ export default function Home() {
                       "Reset"
                     )}
                   </button>
+                </div>
+                
+                {/* AI Text Generation */}
+                <div className="mt-4 flex flex-col gap-2">
+                  <label className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
+                    Generate AI Text
+                  </label>
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      value={aiPrompt}
+                      onChange={(e) => setAiPrompt(e.target.value)}
+                      placeholder="Enter a prompt for AI generation..."
+                      disabled={loading || generatingText}
+                      className="flex-1 px-4 py-2 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-black dark:text-zinc-50 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-gray-100 dark:disabled:bg-gray-800 disabled:cursor-not-allowed"
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && !loading && !generatingText && aiPrompt.trim()) {
+                          sendEvent({ type: "generateText", prompt: aiPrompt.trim() });
+                          setAiPrompt("");
+                        }
+                      }}
+                    />
+                    <button
+                      onClick={() => {
+                        if (aiPrompt.trim()) {
+                          sendEvent({ type: "generateText", prompt: aiPrompt.trim() });
+                          setAiPrompt("");
+                        }
+                      }}
+                      disabled={loading || generatingText || !aiPrompt.trim()}
+                      className="px-6 py-2 rounded-lg bg-purple-600 text-white font-medium hover:bg-purple-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors"
+                    >
+                      {generatingText ? (
+                        <span className="inline-flex items-center gap-2">
+                          <span className="inline-block w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></span>
+                          Generating...
+                        </span>
+                      ) : (
+                        "Generate"
+                      )}
+                    </button>
+                  </div>
+                  {generatingText && (
+                    <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                      AI is generating a response based on your prompt and the current counter value...
+                    </p>
+                  )}
                 </div>
               </div>
             </>
@@ -470,7 +565,7 @@ export default function Home() {
           </h2>
           <ul className="list-disc list-inside space-y-2 text-zinc-700 dark:text-zinc-300">
             <li>
-              Click "Start Actor" to create a new actor instance (workflow run)
+              Click &quot;Start Actor&quot; to create a new actor instance (workflow run)
             </li>
             <li>
               Each actor maintains its own state and processes events

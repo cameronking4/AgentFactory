@@ -1,11 +1,14 @@
-import { defineHook, getWorkflowMetadata } from "workflow";
+import { defineHook, getWorkflowMetadata, fetch } from "workflow";
+import { generateText } from "ai";
 import { actorStateStore } from "@/lib/actor-state-store";
+import 'dotenv/config';
 
 // Define the actor's state
 export interface CounterState {
   count: number;
   lastUpdated: string;
   history: Array<{ timestamp: string; action: string; count: number }>;
+  aiResponse?: string; // Store AI-generated text
 }
 
 // Define events that can be sent to the actor
@@ -13,7 +16,8 @@ export type CounterEvent =
   | { type: "increment"; amount?: number }
   | { type: "decrement"; amount?: number }
   | { type: "reset" }
-  | { type: "getState" };
+  | { type: "getState" }
+  | { type: "generateText"; prompt: string };
 
 // Define the hook once for type safety across workflow and API routes
 export const counterActorHook = defineHook<CounterEvent>();
@@ -36,14 +40,21 @@ export function createInitialState(): CounterState {
 export async function counterActor(initialState: CounterState) {
   "use workflow";
 
+  // Set up fetch for AI SDK (required for workflows)
+  globalThis.fetch = fetch;
+
   // Get workflow metadata to use as actor ID
   const metadata = getWorkflowMetadata();
   const actorId = metadata.workflowRunId;
 
   console.log(`[Actor ${actorId}] Starting with initial state:`, initialState);
 
-  // Initialize the actor's state
-  await setState(actorId, initialState);
+  // Initialize the actor's state only if it doesn't exist
+  // This prevents overwriting state when the workflow restarts
+  const existingState = await getState(actorId);
+  if (!existingState || existingState.count === 0 && existingState.history.length === 0) {
+    await setState(actorId, initialState);
+  }
 
   // Create the hook outside the loop
   // The hook is an async iterator that can receive multiple events
@@ -124,6 +135,7 @@ async function computeNewState(
   const timestamp = new Date().toISOString();
   let newCount = state.count;
   let action = "";
+  let aiResponse: string | undefined = state.aiResponse;
 
   switch (event.type) {
     case "increment":
@@ -141,6 +153,11 @@ async function computeNewState(
     case "getState":
       // Just return current state without modification
       return state;
+    case "generateText":
+      // Generate AI text based on prompt and current state
+      aiResponse = await generateAIText(event.prompt, state);
+      action = `generated AI text: ${event.prompt.substring(0, 30)}...`;
+      break;
   }
 
   return {
@@ -149,5 +166,38 @@ async function computeNewState(
     history: [...state.history, { timestamp, action, count: newCount }].slice(
       -10
     ), // Keep last 10 history entries
+    aiResponse,
   };
+}
+
+/**
+ * Generates text using AI SDK based on a prompt and current actor state.
+ * This is a step function, making it durable and retryable.
+ */
+async function generateAIText(
+  prompt: string,
+  state: CounterState
+): Promise<string> {
+  "use step";
+
+  try {
+    // Create a context-aware prompt that includes the current counter state
+    const contextualPrompt = `You are a helpful assistant. The current counter value is ${state.count}. 
+
+User prompt: ${prompt}
+
+Please provide a helpful response.`;
+
+    const result = await generateText({
+      model: 'openai/gpt-4.1' as never, // Uses Vercel AI Gateway automatically (type assertion for v5 compatibility)
+      prompt: contextualPrompt,
+      maxTokens: 500,
+    });
+
+    return result.text;
+  } catch (error) {
+    console.error("Error generating AI text:", error);
+    // Return a fallback message if AI generation fails
+    return `Sorry, I couldn't generate a response. Error: ${error instanceof Error ? error.message : "Unknown error"}`;
+  }
 }

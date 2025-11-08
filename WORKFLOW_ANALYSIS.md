@@ -420,3 +420,8 @@ This repository demonstrates a **well-implemented Actor Pattern** using Vercel W
 
 The implementation is production-ready with the addition of persistent state storage and enhanced observability.
 
+## Related Documentation
+
+For integrating AI capabilities with workflows, see:
+- **[AI SDK + Workflows Integration Guide](./AI_SDK_WORKFLOWS_GUIDE.md)** - Comprehensive guide on using Vercel AI SDK with workflows, including streaming, tool execution, and agent patterns
+
