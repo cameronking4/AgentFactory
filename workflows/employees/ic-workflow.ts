@@ -1,9 +1,8 @@
 import { defineHook, getWorkflowMetadata, fetch } from "workflow";
 import { generateText } from "ai";
-import { openai } from "@ai-sdk/openai";
 import { db } from "@/lib/db";
 import { employees, tasks, deliverables, memories } from "@/lib/db/schema";
-import { eq, and, isNull, sql, or } from "drizzle-orm";
+import { eq, and, sql, or } from "drizzle-orm";
 import { icMeetingHook, icPingHook } from "@/workflows/shared/hooks";
 import { managerEvaluationHook } from "@/workflows/employees/manager-workflow";
 import "dotenv/config";
@@ -44,6 +43,7 @@ export interface ReflectionInsight {
 export type ICEvent =
   | { type: "newTask"; taskId: string }
   | { type: "taskAssigned"; taskId: string }
+  | { type: "revisionRequested"; taskId: string; feedback: string } // Manager requested revision
   | { type: "getStatus" };
 
 // Define hook for IC task assignments
@@ -110,37 +110,7 @@ export async function icEmployeeWorkflow(initialState: ICState) {
 
   // Main autonomous loop - both reactive and proactive
   while (true) {
-    // Reactive: Process tasks
-    for await (const event of receiveTask) {
-      try {
-        console.log(`[IC ${employeeId}] Received task event:`, event);
-        if (event.type === "newTask" || event.type === "taskAssigned") {
-          await handleNewTask(employeeId, event.taskId);
-        }
-      } catch (err) {
-        console.error(`[IC ${employeeId}] Error processing task event:`, err);
-      }
-    }
-
-    // Reactive: Attend meetings
-    for await (const meeting of receiveMeeting) {
-      try {
-        await attendMeeting(employeeId, meeting);
-      } catch (err) {
-        console.error(`[IC ${employeeId}] Error attending meeting:`, err);
-      }
-    }
-
-    // Reactive: Respond to pings
-    for await (const ping of receivePing) {
-      try {
-        await respondToPing(employeeId, ping);
-      } catch (err) {
-        console.error(`[IC ${employeeId}] Error responding to ping:`, err);
-      }
-    }
-
-    // Proactive: Check for new tasks assigned to this IC
+    // Proactive: Check for new tasks assigned to this IC (run first to pick up new work)
     await checkForNewTasks(employeeId);
 
     // Proactive: Execute current tasks autonomously
@@ -155,8 +125,61 @@ export async function icEmployeeWorkflow(initialState: ICState) {
     // Proactive: Identify and create improvement tasks
     await identifyImprovements(employeeId);
 
-    // Small delay to prevent tight loop
-    await new Promise((resolve) => setTimeout(resolve, 5000)); // Check every 5 seconds
+    // Reactive: Process one task event if available (non-blocking check)
+    // Use a timeout to allow proactive checks to continue
+    const taskEventPromise = (async () => {
+      for await (const event of receiveTask) {
+        return event; // Return first event
+      }
+    })();
+
+    const meetingEventPromise = (async () => {
+      for await (const meeting of receiveMeeting) {
+        return meeting; // Return first meeting
+      }
+    })();
+
+    const pingEventPromise = (async () => {
+      for await (const ping of receivePing) {
+        return ping; // Return first ping
+      }
+    })();
+
+    // Wait for any reactive event or timeout (5 seconds)
+    type ReactiveEventResult =
+      | { type: "task"; event: ICEvent }
+      | { type: "meeting"; meeting: import("@/workflows/shared/hooks").ICMeetingEvent }
+      | { type: "ping"; ping: import("@/workflows/shared/hooks").ICPingEvent }
+      | { type: "timeout" };
+
+    const result = (await Promise.race([
+      taskEventPromise.then((event) => ({ type: "task" as const, event })),
+      meetingEventPromise.then((meeting) => ({ type: "meeting" as const, meeting })),
+      pingEventPromise.then((ping) => ({ type: "ping" as const, ping })),
+      new Promise<{ type: "timeout" }>((resolve) =>
+        setTimeout(() => resolve({ type: "timeout" }), 5000)
+      ),
+    ])) as ReactiveEventResult;
+
+    // Process the event if one was received
+    if (result.type !== "timeout") {
+      try {
+        if (result.type === "task") {
+          console.log(`[IC ${employeeId}] Received task event:`, result.event);
+          if (result.event.type === "newTask" || result.event.type === "taskAssigned") {
+            await handleNewTask(employeeId, result.event.taskId);
+          } else if (result.event.type === "revisionRequested") {
+            await handleRevisionRequest(employeeId, result.event.taskId, result.event.feedback);
+          }
+        } else if (result.type === "meeting") {
+          await attendMeeting(employeeId, result.meeting);
+        } else if (result.type === "ping") {
+          await respondToPing(employeeId, result.ping);
+        }
+      } catch (err) {
+        console.error(`[IC ${employeeId}] Error processing reactive event:`, err);
+      }
+    }
   }
 }
 
@@ -214,9 +237,65 @@ async function handleNewTask(employeeId: string, taskId: string) {
 }
 
 /**
+ * Handles a revision request from manager
+ */
+async function handleRevisionRequest(
+  employeeId: string,
+  taskId: string,
+  feedback: string
+) {
+  "use step";
+
+  console.log(`[IC ${employeeId}] Handling revision request for task: ${taskId}`);
+
+  try {
+    // Get task from database
+    const [task] = await db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, taskId))
+      .limit(1);
+
+    if (!task) {
+      console.error(`[IC ${employeeId}] Task ${taskId} not found`);
+      return;
+    }
+
+    // Store revision feedback in memory
+    const state = await getICState(employeeId);
+    if (state) {
+      await db.insert(memories).values({
+        employeeId: employeeId,
+        type: "task",
+        content: `Revision requested for task "${task.title}". Manager feedback: ${feedback}`,
+        importance: "0.8",
+      });
+
+      // Add task back to current tasks if not already there
+      if (!state.currentTasks.includes(taskId)) {
+        await setICState(employeeId, {
+          ...state,
+          currentTasks: [...state.currentTasks, taskId],
+          lastActive: new Date().toISOString(),
+        });
+      }
+    }
+
+    // Task status should already be "in-progress" from manager workflow
+    // IC will pick it up in the next execution cycle
+    console.log(`[IC ${employeeId}] Revision request processed for task ${taskId}`);
+  } catch (error) {
+    console.error(`[IC ${employeeId}] Error handling revision request:`, error);
+  }
+}
+
+/**
  * Breaks down a high-level task into subtasks using AI
  */
-async function breakDownTask(employeeId: string, task: any) {
+async function breakDownTask(
+  employeeId: string,
+  task: { id: string; title: string; description: string; parentTaskId: string | null }
+) {
   "use step";
 
   console.log(`[IC ${employeeId}] Breaking down task: ${task.title}`);
@@ -440,28 +519,9 @@ async function executeCurrentTasks(employeeId: string) {
         continue;
       }
 
-      // Check if this is a subtask with dependencies
-      if (task.parentTaskId) {
-        const dependencies = await db
-          .select()
-          .from(tasks)
-          .where(eq(tasks.parentTaskId, task.parentTaskId));
-
-        // Check if all dependencies are complete
-        const incompleteDeps = dependencies.filter(
-          (dep) =>
-            dep.id !== taskId &&
-            dep.status !== "completed" &&
-            dep.status !== "reviewed"
-        );
-
-        if (incompleteDeps.length > 0) {
-          console.log(
-            `[IC ${employeeId}] Task ${taskId} waiting for ${incompleteDeps.length} dependencies`
-          );
-          continue;
-        }
-      }
+      // For now, allow parallel execution of subtasks
+      // TODO: Implement proper dependency tracking based on task breakdown analysis
+      // Subtasks can often be executed in parallel unless explicitly marked as dependent
 
       // Execute the task
       if (task.status === "pending") {
@@ -484,7 +544,10 @@ async function executeCurrentTasks(employeeId: string) {
 /**
  * Executes a single task and creates deliverables
  */
-async function executeTask(employeeId: string, task: any) {
+async function executeTask(
+  employeeId: string,
+  task: { id: string; title: string; description: string; parentTaskId: string | null }
+) {
   "use step";
 
   console.log(`[IC ${employeeId}] Executing task: ${task.title}`);
@@ -519,6 +582,23 @@ async function executeTask(employeeId: string, task: any) {
       }
     }
 
+    // Check if this is a revision (task was previously completed)
+    const isRevision = state.completedTasks.includes(task.id);
+    let revisionFeedback = "";
+    if (isRevision) {
+      // Get feedback from the latest deliverable
+      const taskDeliverables = await db
+        .select()
+        .from(deliverables)
+        .where(eq(deliverables.taskId, task.id))
+        .orderBy(sql`${deliverables.createdAt} DESC`)
+        .limit(1);
+      
+      if (taskDeliverables.length > 0 && taskDeliverables[0].feedback) {
+        revisionFeedback = `\n\n⚠️ REVISION REQUESTED - Manager Feedback:\n${taskDeliverables[0].feedback}\n\nPlease address the feedback and improve the deliverable.`;
+      }
+    }
+
     // Use AI to execute the task
     const prompt = `You are an autonomous IC employee executing a task. Use your skills, learned knowledge, and context to complete this task.
 
@@ -528,6 +608,7 @@ Your Reflection Insights: ${state.reflectionInsights.map((i) => i.insight).join(
 
 ${parentContext}Task: ${task.title}
 Description: ${task.description}
+${revisionFeedback}
 
 Relevant Context from Past Work:
 ${context || "No relevant context yet"}
@@ -537,6 +618,7 @@ Execute this task and produce a deliverable. The deliverable should be:
 - Well-documented
 - Following best practices
 - Aligned with the parent task goals
+${isRevision ? "- Address all feedback from the manager" : ""}
 
 Respond with a JSON object:
 {
@@ -951,7 +1033,10 @@ Respond in JSON:
 /**
  * Attends a meeting
  */
-async function attendMeeting(employeeId: string, meeting: any) {
+async function attendMeeting(
+  employeeId: string,
+  meeting: import("@/workflows/shared/hooks").ICMeetingEvent
+) {
   "use step";
 
   console.log(`[IC ${employeeId}] Attending meeting: ${meeting.meetingId}`);
@@ -972,38 +1057,53 @@ async function attendMeeting(employeeId: string, meeting: any) {
 /**
  * Responds to a ping
  */
-async function respondToPing(employeeId: string, ping: any) {
+async function respondToPing(
+  employeeId: string,
+  ping: import("@/workflows/shared/hooks").ICPingEvent
+) {
   "use step";
-
-  console.log(`[IC ${employeeId}] Responding to ping from ${ping.from}`);
 
   try {
     const state = await getICState(employeeId);
     if (!state) return;
 
-    // Store ping in memory
-    await db.insert(memories).values({
-      employeeId: employeeId,
-      type: "interaction",
-      content: `Received ping from ${ping.from}: ${ping.message}`,
-      importance: "0.5",
-    });
+    if (ping.type === "receivePing") {
+      console.log(`[IC ${employeeId}] Responding to ping from ${ping.from}`);
 
-    // Record collaboration
-    await setICState(employeeId, {
-      ...state,
-      collaborationHistory: [
-        ...state.collaborationHistory,
-        {
-          type: "received_help",
-          with: ping.from,
-          taskId: "",
-          timestamp: new Date().toISOString(),
-          details: `Received ping: ${ping.message}`,
-        },
-      ],
-      lastActive: new Date().toISOString(),
-    });
+      // Store ping in memory
+      await db.insert(memories).values({
+        employeeId: employeeId,
+        type: "interaction",
+        content: `Received ping from ${ping.from}: ${ping.message}`,
+        importance: "0.5",
+      });
+
+      // Record collaboration
+      await setICState(employeeId, {
+        ...state,
+        collaborationHistory: [
+          ...state.collaborationHistory,
+          {
+            type: "received_help",
+            with: ping.from,
+            taskId: "",
+            timestamp: new Date().toISOString(),
+            details: `Received ping: ${ping.message}`,
+          },
+        ],
+        lastActive: new Date().toISOString(),
+      });
+    } else if (ping.type === "pingResponse") {
+      // Handle ping response (when someone responds to our ping)
+      console.log(`[IC ${employeeId}] Received ping response from ${ping.to}`);
+
+      await db.insert(memories).values({
+        employeeId: employeeId,
+        type: "interaction",
+        content: `Received response to ping: ${ping.response}`,
+        importance: "0.5",
+      });
+    }
   } catch (error) {
     console.error(`[IC ${employeeId}] Error responding to ping:`, error);
   }
@@ -1084,7 +1184,7 @@ async function getICState(employeeId: string): Promise<ICState | null> {
   }
 }
 
-async function setICState(employeeId: string, state: ICState): Promise<void> {
+async function setICState(employeeId: string, _state: ICState): Promise<void> {
   "use step";
 
   try {

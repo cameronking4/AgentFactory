@@ -115,6 +115,7 @@ export const deliverables = pgTable(
       .references(() => employees.id),
     evaluatedBy: uuid("evaluated_by").references(() => employees.id),
     evaluationScore: integer("evaluation_score"),
+    feedback: text("feedback"), // Manager feedback for revisions
     createdAt: timestamp("created_at").notNull().defaultNow(),
     updatedAt: timestamp("updated_at").notNull().defaultNow(),
   },
