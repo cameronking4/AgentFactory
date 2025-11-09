@@ -2,7 +2,7 @@ import { defineHook, getWorkflowMetadata, fetch } from "workflow";
 import { generateText } from "ai";
 import { db } from "@/lib/db";
 import { employees, meetings, tasks, memories } from "@/lib/db/schema";
-import { eq, and } from "drizzle-orm";
+import { eq, and, inArray } from "drizzle-orm";
 import { icMeetingHook, icPingHook } from "@/workflows/shared/hooks";
 import "dotenv/config";
 
@@ -262,11 +262,11 @@ async function runStandupMeeting(
   );
 
   try {
-    // Get participant information
+    // Get participant information for all participants
     const participants = await db
       .select()
       .from(employees)
-      .where(eq(employees.id, participantIds[0])); // Get first for now
+      .where(inArray(employees.id, participantIds));
 
     // Notify all participants to join the meeting
     // Generate UUID manually since crypto.randomUUID() may not be available

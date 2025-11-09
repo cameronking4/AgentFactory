@@ -767,15 +767,107 @@ export default function CEODashboard() {
           <div className="rounded-lg border shadow overflow-hidden">
             {allMeetings.length === 0 ? (
               <div className="p-8">
-                <p className="text-center py-8">No meetings yet. Meetings will appear here as they are conducted.</p>
+                <p className="text-center py-8 mb-4">No meetings yet. Meetings will appear here as they are conducted.</p>
+                <div className="flex justify-center">
+                  <button
+                    onClick={async () => {
+                      setLoading(true);
+                      setError(null);
+                      setSuccess(null);
+                      try {
+                        const response = await fetch("/api/meetings/trigger-standups", {
+                          method: "POST",
+                        });
+                        const data = await response.json();
+                        if (data.success) {
+                          setSuccess(`Successfully triggered ${data.meetingsTriggered} standup meeting(s)! Meetings will appear shortly.`);
+                          // Refresh meetings after a short delay
+                          setTimeout(() => {
+                            const refreshData = async () => {
+                              try {
+                                const meetingsRes = await fetch("/api/meetings");
+                                if (meetingsRes.ok) {
+                                  const meetingsData = await meetingsRes.json();
+                                  if (meetingsData.success) {
+                                    setAllMeetings(meetingsData.meetings || []);
+                                  }
+                                }
+                              } catch (err) {
+                                console.error("Error refreshing meetings:", err);
+                              }
+                            };
+                            refreshData();
+                          }, 3000);
+                        } else {
+                          setError(data.error || "Failed to trigger standup meetings");
+                        }
+                      } catch (err) {
+                        setError(err instanceof Error ? err.message : "Unknown error");
+                      } finally {
+                        setLoading(false);
+                      }
+                    }}
+                    disabled={loading}
+                    className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {loading ? "Triggering..." : "Trigger Standup Meetings for All Managers"}
+                  </button>
+                </div>
               </div>
             ) : (
               <div className="grid grid-cols-1 lg:grid-cols-2 h-[calc(100vh-300px)]">
                 {/* Left Panel - Meetings List */}
                 <div className="border-r overflow-hidden flex flex-col">
                   <div className="p-4 border-b bg-gray-50">
-                    <h2 className="text-xl font-semibold">All Meetings</h2>
-                    <p className="text-sm text-gray-600 mt-1">{allMeetings.length} total</p>
+                    <div className="flex justify-between items-center mb-2">
+                      <div>
+                        <h2 className="text-xl font-semibold">All Meetings</h2>
+                        <p className="text-sm text-gray-600 mt-1">{allMeetings.length} total</p>
+                      </div>
+                      <button
+                        onClick={async () => {
+                          setLoading(true);
+                          setError(null);
+                          setSuccess(null);
+                          try {
+                            const response = await fetch("/api/meetings/trigger-standups", {
+                              method: "POST",
+                            });
+                            const data = await response.json();
+                            if (data.success) {
+                              setSuccess(`Successfully triggered ${data.meetingsTriggered} standup meeting(s)!`);
+                              // Refresh meetings after a short delay
+                              setTimeout(() => {
+                                const refreshData = async () => {
+                                  try {
+                                    const meetingsRes = await fetch("/api/meetings");
+                                    if (meetingsRes.ok) {
+                                      const meetingsData = await meetingsRes.json();
+                                      if (meetingsData.success) {
+                                        setAllMeetings(meetingsData.meetings || []);
+                                      }
+                                    }
+                                  } catch (err) {
+                                    console.error("Error refreshing meetings:", err);
+                                  }
+                                };
+                                refreshData();
+                              }, 3000);
+                            } else {
+                              setError(data.error || "Failed to trigger standup meetings");
+                            }
+                          } catch (err) {
+                            setError(err instanceof Error ? err.message : "Unknown error");
+                          } finally {
+                            setLoading(false);
+                          }
+                        }}
+                        disabled={loading}
+                        className="px-3 py-1.5 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        {loading ? "Triggering..." : "Trigger Standups"}
+                      </button>
+                    </div>
                   </div>
                   <div className="flex-1 overflow-y-auto">
                     {allMeetings
