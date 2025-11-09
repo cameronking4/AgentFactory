@@ -27,7 +27,7 @@ async function applyMigration() {
 
   for (const statement of statements) {
     try {
-      await sql(statement);
+      await sql.unsafe(statement);
       console.log(`✅ Applied: ${statement.substring(0, 50)}...`);
     } catch (error: any) {
       if (error.message?.includes("already exists") || error.message?.includes("duplicate")) {

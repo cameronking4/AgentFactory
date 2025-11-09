@@ -1,6 +1,6 @@
 import { db } from "@/lib/db";
 import { costs } from "@/lib/db/schema";
-import type { GenerateTextResult } from "ai";
+import { generateText } from "ai";
 
 /**
  * Estimates cost based on model and token usage
@@ -37,7 +37,7 @@ function estimateCost(
  * Note: This should be called from within a step function
  */
 export async function trackAICost(
-  result: GenerateTextResult<unknown>,
+  result: Awaited<ReturnType<typeof generateText>>,
   options: {
     employeeId: string | null;
     taskId: string | null;
@@ -54,9 +54,11 @@ export async function trackAICost(
       return;
     }
 
-    const promptTokens = usage.promptTokens || 0;
-    const completionTokens = usage.completionTokens || 0;
-    const totalTokens = usage.totalTokens || promptTokens + completionTokens;
+    // AI SDK v5 uses LanguageModelV2Usage which has inputTokens and outputTokens
+    // (not promptTokens/completionTokens)
+    const promptTokens = usage.inputTokens ?? 0;
+    const completionTokens = usage.outputTokens ?? 0;
+    const totalTokens = usage.totalTokens ?? (promptTokens + completionTokens);
 
     // If we only have totalTokens, estimate split (typically 70% prompt, 30% completion)
     let estimatedPromptTokens = promptTokens;

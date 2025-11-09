@@ -105,11 +105,14 @@ export async function GET(
     let stageStartTime = new Date(task.createdAt).getTime();
 
     for (const activity of activities) {
-      if (activity.type === "status_change" || activity.type === "task_completed") {
+      if (
+        (activity.type === "status_change" || activity.type === "task_completed" || activity.type === "task_created") &&
+        "status" in activity
+      ) {
         const stageEndTime = new Date(activity.timestamp).getTime();
         const duration = stageEndTime - stageStartTime;
         stageTimes[currentStage] = (stageTimes[currentStage] || 0) + duration;
-        currentStage = activity.status;
+        currentStage = activity.status as string;
         stageStartTime = stageEndTime;
       }
     }
