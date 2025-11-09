@@ -14,10 +14,7 @@ interface OverviewTabProps {
 }
 
 export function OverviewTab({ tasks, employees, deliverables, costs }: OverviewTabProps) {
-  const highLevelTasks = tasks.filter((t) => !t.parentTaskId);
-  const completedTasks = tasks.filter((t) => t.status === "completed");
   const activeEmployees = employees.filter((e) => e.status === "active");
-  const totalCost = costs.reduce((sum, cost) => sum + parseFloat(cost.amount || "0"), 0);
 
   return (
     <div className="space-y-6">

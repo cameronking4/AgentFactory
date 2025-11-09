@@ -6,6 +6,7 @@ import { eq, and, sql, or } from "drizzle-orm";
 import { icMeetingHook, icPingHook } from "@/workflows/shared/hooks";
 import { managerEvaluationHook, type ManagerEvent } from "@/workflows/employees/manager-workflow";
 import { trackAICost } from "@/lib/ai/cost-tracking";
+import { get as redisGet, set as redisSet } from "@/lib/redis";
 import "dotenv/config";
 
 // IC Workflow State

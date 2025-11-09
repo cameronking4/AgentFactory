@@ -61,17 +61,24 @@ export async function GET(
 }
 
 /**
- * POST /api/ceo/[ceoId]/reports/[reportId]/respond
+ * POST /api/ceo/[ceoId]/reports
  * CEO responds to a report
  */
 export async function POST(
   request: Request,
-  { params }: { params: Promise<{ ceoId: string; reportId: string }> }
+  { params }: { params: Promise<{ ceoId: string }> }
 ): Promise<NextResponse> {
   try {
-    const { ceoId, reportId } = await params;
+    const { ceoId } = await params;
     const body = await request.json();
-    const { response } = body;
+    const { reportId, response } = body;
+
+    if (!reportId) {
+      return NextResponse.json(
+        { error: "reportId is required" },
+        { status: 400 }
+      );
+    }
 
     if (!response) {
       return NextResponse.json(
