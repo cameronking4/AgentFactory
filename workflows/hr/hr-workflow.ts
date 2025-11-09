@@ -3,17 +3,12 @@ import { generateText } from "ai";
 import { openai } from "@ai-sdk/openai";
 import { db } from "@/lib/db";
 import { employees, tasks, memories, costs } from "@/lib/db/schema";
-import { eq, and, sql, isNull, inArray } from "drizzle-orm";
+import { eq, and, sql, isNull, inArray, or } from "drizzle-orm";
 import { trackAICost } from "@/lib/ai/cost-tracking";
-import { start } from "workflow/api";
 import {
-  managerWorkflow,
-  createInitialManagerState,
   managerEvaluationHook,
 } from "@/workflows/employees/manager-workflow";
 import {
-  icEmployeeWorkflow,
-  createInitialICState,
   icTaskHook,
 } from "@/workflows/employees/ic-workflow";
 import "dotenv/config";
@@ -86,6 +81,14 @@ export async function hrWorkflow(initialState: HRState) {
       // Continue loop even if check fails
     }
 
+    // Proactive: Self-healing - Ensure IC workflows are running for employees with active tasks
+    try {
+      await ensureICWorkflowsRunning(hrId);
+    } catch (err) {
+      console.error(`[HR ${hrId}] Error in ensureICWorkflowsRunning:`, err);
+      // Continue loop even if check fails
+    }
+
     // Proactive: Assign pending tasks to available employees
     try {
       await assignTasksToAvailableEmployees(hrId);
@@ -150,6 +153,25 @@ export async function hrWorkflow(initialState: HRState) {
 async function handleNewTask(hrId: string, event: { taskId: string; taskTitle: string; taskDescription: string }) {
   "use step";
 
+  // Check if task is already being processed to prevent duplicates
+  const state = await getHRState(hrId);
+  if (state && state.activeTasks.includes(event.taskId)) {
+    console.log(`[HR ${hrId}] Task ${event.taskId} is already being processed, skipping duplicate`);
+    return;
+  }
+
+  // Check if task is already assigned (might have been processed by another HR instance)
+  const [existingTask] = await db
+    .select()
+    .from(tasks)
+    .where(eq(tasks.id, event.taskId))
+    .limit(1);
+
+  if (existingTask && existingTask.assignedTo) {
+    console.log(`[HR ${hrId}] Task ${event.taskId} is already assigned to ${existingTask.assignedTo}, skipping`);
+    return;
+  }
+
   console.log(`[HR ${hrId}] Processing new task: ${event.taskId}`);
 
   // 1. Analyze the task
@@ -195,20 +217,20 @@ async function handleNewTask(hrId: string, event: { taskId: string; taskTitle: s
     await assignTaskToICs(event.taskId, assignedEmployeeIds);
   }
 
-  // Update state
-  const state = await getHRState(hrId);
-  if (!state) {
+  // Update state - get fresh state since it may have changed
+  const currentState = await getHRState(hrId);
+  if (!currentState) {
     console.error(`[HR ${hrId}] State not found when updating after task assignment`);
     return;
   }
   const newlyHired = assignedEmployeeIds.filter(
-    (id) => !state.hiredEmployees.includes(id)
+    (id) => !currentState.hiredEmployees.includes(id)
   );
   await setHRState(hrId, {
-    ...state,
+    ...currentState,
     hrId, // Ensure hrId is always set
-    activeTasks: [...state.activeTasks, event.taskId],
-    hiredEmployees: [...new Set([...state.hiredEmployees, ...assignedEmployeeIds])],
+    activeTasks: [...currentState.activeTasks, event.taskId],
+    hiredEmployees: [...new Set([...currentState.hiredEmployees, ...assignedEmployeeIds])],
   });
 
   const reusedCount = assignedEmployeeIds.length - newlyHired.length;
@@ -714,11 +736,21 @@ async function createManager(hrId: string): Promise<string> {
 
     console.log(`[HR ${hrId}] Created new manager: ${manager.id} (${manager.name})`);
 
-    // Start manager workflow directly
+    // Start manager workflow via API route (cannot use start() from within step functions)
     try {
-      const initialState = createInitialManagerState(manager.id, manager.name);
-      const result = await start(managerWorkflow, [initialState]);
-      console.log(`[HR ${hrId}] Started manager workflow for ${manager.id}: ${result.runId}`);
+      const baseUrl = process.env.NEXT_PUBLIC_APP_URL || 
+        (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'http://localhost:3000');
+      const response = await fetch(`${baseUrl}/api/managers/${manager.id}/start`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      
+      if (response.ok) {
+        const result = await response.json();
+        console.log(`[HR ${hrId}] Started manager workflow for ${manager.id}: ${result.workflowRunId || result.managerId}`);
+      } else {
+        console.warn(`[HR ${hrId}] Failed to start manager workflow: ${response.status} ${response.statusText}`);
+      }
     } catch (workflowError) {
       console.error(`[HR ${hrId}] Error starting manager workflow:`, workflowError);
       // Continue - workflow can be started manually later
@@ -881,16 +913,21 @@ async function hireIC(hrId: string, requirement: ICRequirement): Promise<string 
       console.warn(`[HR ${hrId}] Could not notify manager workflow:`, hookError);
     }
 
-    // Start IC workflow directly
+    // Start IC workflow via API route (cannot use start() from within step functions)
     try {
-      const initialState = createInitialICState(
-        employee.id,
-        employee.name,
-        requirement.skills,
-        managerId
-      );
-      const result = await start(icEmployeeWorkflow, [initialState]);
-      console.log(`[HR ${hrId}] Started IC workflow for ${employee.id}: ${result.runId}`);
+      const baseUrl = process.env.NEXT_PUBLIC_APP_URL || 
+        (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'http://localhost:3000');
+      const response = await fetch(`${baseUrl}/api/employees/${employee.id}/start`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      
+      if (response.ok) {
+        const result = await response.json();
+        console.log(`[HR ${hrId}] Started IC workflow for ${employee.id}: ${result.workflowRunId}`);
+      } else {
+        console.warn(`[HR ${hrId}] Failed to start IC workflow: ${response.status} ${response.statusText}`);
+      }
     } catch (workflowError) {
       console.error(
         `[HR ${hrId}] Error starting IC workflow:`,
@@ -1141,6 +1178,113 @@ async function assignNewEmployeeToPendingTasks(
   } catch (error) {
     console.error(`[HR ${hrId}] Error assigning pending tasks to new employee:`, error);
     // Don't throw - this is a nice-to-have feature
+  }
+}
+
+/**
+ * Self-healing: Ensures IC workflows are running for employees with active tasks
+ * This makes the system truly autonomous - ICs will continue working even after restarts
+ */
+async function ensureICWorkflowsRunning(hrId: string) {
+  "use step";
+
+  try {
+    // Only check very occasionally (5% chance per loop) to reduce overhead and prevent excessive workflow starts
+    if (Math.random() > 0.05) return;
+
+    // Get all active IC employees
+    const allICs = await db
+      .select({
+        id: employees.id,
+        name: employees.name,
+        managerId: employees.managerId,
+        skills: employees.skills,
+        updatedAt: employees.updatedAt,
+      })
+      .from(employees)
+      .where(
+        and(
+          eq(employees.role, "ic"),
+          eq(employees.status, "active")
+        )
+      );
+
+    if (allICs.length === 0) return;
+
+    // Get all employees with active tasks (pending or in-progress)
+    const employeesWithActiveTasks = await db
+      .select({
+        employeeId: tasks.assignedTo,
+      })
+      .from(tasks)
+      .where(
+        and(
+          or(
+            eq(tasks.status, "pending"),
+            eq(tasks.status, "in-progress")
+          ),
+          sql`${tasks.assignedTo} IS NOT NULL`
+        )
+      )
+      .groupBy(tasks.assignedTo);
+
+    const employeeIdsWithTasks = new Set(
+      employeesWithActiveTasks
+        .map((t) => t.employeeId)
+        .filter((id): id is string => id !== null)
+    );
+
+    // For each IC with active tasks, ensure their workflow is running
+    for (const ic of allICs) {
+      if (!employeeIdsWithTasks.has(ic.id)) continue;
+
+      // Check if employee has been active recently (indicates workflow might be running)
+      // Use a longer time window (10 minutes) to avoid starting duplicate workflows
+      const lastUpdated = ic.updatedAt 
+        ? new Date(ic.updatedAt).getTime() 
+        : 0;
+      const tenMinutesAgo = Date.now() - 10 * 60 * 1000;
+      const shouldStartWorkflow = lastUpdated < tenMinutesAgo;
+
+      if (shouldStartWorkflow) {
+        console.log(
+          `[HR ${hrId}] Self-healing: Starting IC workflow for ${ic.id} (${ic.name}) with active tasks (last updated: ${ic.updatedAt ? new Date(ic.updatedAt).toISOString() : 'never'})`
+        );
+
+        try {
+          const baseUrl = process.env.NEXT_PUBLIC_APP_URL || 
+            (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'http://localhost:3000');
+          const response = await fetch(`${baseUrl}/api/employees/${ic.id}/start`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+          });
+
+          // 503 means workflow is already running - that's fine, don't log as error
+          if (response.ok) {
+            const result = await response.json();
+            console.log(
+              `[HR ${hrId}] Self-healing: Started IC workflow for ${ic.id}: ${result.workflowRunId}`
+            );
+          } else if (response.status === 503) {
+            // Workflow already running - this is expected and fine
+            // Silently continue
+          } else {
+            console.warn(
+              `[HR ${hrId}] Self-healing: Failed to start IC workflow for ${ic.id}: ${response.status}`
+            );
+          }
+        } catch (error) {
+          console.error(
+            `[HR ${hrId}] Self-healing: Error starting IC workflow for ${ic.id}:`,
+            error
+          );
+          // Continue - will retry on next check
+        }
+      }
+    }
+  } catch (error) {
+    console.error(`[HR ${hrId}] Error in ensureICWorkflowsRunning:`, error);
+    // Don't throw - this is a self-healing mechanism, shouldn't break main loop
   }
 }
 

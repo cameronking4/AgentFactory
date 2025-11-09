@@ -90,10 +90,17 @@ export async function icEmployeeWorkflow(initialState: ICState) {
     `[IC ${employeeId}] Starting IC workflow (workflow: ${workflowRunId})`
   );
 
-  // Initialize state
+  // Initialize state - always rebuild from database for durability
+  // This ensures state is always in sync with database, even after restarts
   const existingState = await getICState(employeeId);
   if (!existingState) {
     await setICState(employeeId, initialState);
+  } else {
+    // Update lastActive to indicate workflow is running
+    await setICState(employeeId, {
+      ...existingState,
+      lastActive: new Date().toISOString(),
+    });
   }
 
   // Create hooks for different event types
@@ -111,7 +118,17 @@ export async function icEmployeeWorkflow(initialState: ICState) {
 
   // Main autonomous loop - both reactive and proactive
   while (true) {
+    // Update lastActive timestamp to indicate workflow is running (for self-healing detection)
+    const currentState = await getICState(employeeId);
+    if (currentState) {
+      await setICState(employeeId, {
+        ...currentState,
+        lastActive: new Date().toISOString(),
+      });
+    }
+
     // Proactive: Check for new tasks assigned to this IC (run first to pick up new work)
+    // This ensures tasks are picked up even if notifications were missed
     await checkForNewTasks(employeeId);
 
     // Proactive: Execute current tasks autonomously
@@ -483,6 +500,8 @@ Respond in JSON format:
 
 /**
  * Proactively checks for new tasks assigned to this IC
+ * This is the key autonomous behavior - ICs automatically pick up work assigned to them
+ * even if they missed notifications or restarted
  */
 async function checkForNewTasks(employeeId: string) {
   "use step";
@@ -491,8 +510,9 @@ async function checkForNewTasks(employeeId: string) {
     const state = await getICState(employeeId);
     if (!state) return;
 
-    // Get tasks assigned to this IC that are not in current tasks
-    const newTasks = await db
+    // Get ALL tasks assigned to this IC that are pending or in-progress
+    // This ensures we pick up tasks even if they were assigned while workflow was down
+    const assignedTasks = await db
       .select()
       .from(tasks)
       .where(
@@ -505,10 +525,33 @@ async function checkForNewTasks(employeeId: string) {
         )
       );
 
-    for (const task of newTasks) {
+    // Add any tasks not already in currentTasks
+    for (const task of assignedTasks) {
       if (!state.currentTasks.includes(task.id)) {
-        console.log(`[IC ${employeeId}] Found new task: ${task.id} - ${task.title}`);
+        console.log(
+          `[IC ${employeeId}] Autonomously discovered new task: ${task.id} - ${task.title} (status: ${task.status})`
+        );
         await handleNewTask(employeeId, task.id);
+      }
+    }
+
+    // Also check for tasks that are in currentTasks but might have been completed
+    // and remove them from currentTasks if they're done
+    const updatedState = await getICState(employeeId);
+    if (updatedState) {
+      const activeTaskIds = new Set(assignedTasks.map((t) => t.id));
+      const tasksToRemove = updatedState.currentTasks.filter(
+        (taskId) => !activeTaskIds.has(taskId)
+      );
+
+      if (tasksToRemove.length > 0) {
+        await setICState(employeeId, {
+          ...updatedState,
+          currentTasks: updatedState.currentTasks.filter(
+            (taskId) => !tasksToRemove.includes(taskId)
+          ),
+          lastActive: new Date().toISOString(),
+        });
       }
     }
   } catch (error) {
@@ -1303,11 +1346,12 @@ async function getICState(employeeId: string): Promise<ICState | null> {
   }
 }
 
-async function setICState(employeeId: string, _state: ICState): Promise<void> {
+async function setICState(employeeId: string, state: ICState): Promise<void> {
   "use step";
 
   try {
-    // Update employee's updatedAt timestamp
+    // Update employee's updatedAt timestamp to indicate workflow is active
+    // This is used by HR workflow's self-healing mechanism to detect if workflow is running
     await db
       .update(employees)
       .set({
@@ -1317,6 +1361,7 @@ async function setICState(employeeId: string, _state: ICState): Promise<void> {
 
     // State is primarily stored in database (employees, tasks, memories tables)
     // In production, would use Redis or dedicated state table for collaborationHistory and reflectionInsights
+    // The lastActive field in state is used for workflow health monitoring
   } catch (error) {
     console.error(`Error setting IC state:`, error);
   }

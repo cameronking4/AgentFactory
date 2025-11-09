@@ -11,6 +11,7 @@ import {
 /**
  * POST /api/hr
  * Starts a new HR workflow instance
+ * Note: If a workflow is already running, this will return 503
  */
 export async function POST(request: Request): Promise<NextResponse> {
   try {
@@ -19,16 +20,37 @@ export async function POST(request: Request): Promise<NextResponse> {
       body.initialState ?? createInitialHRState();
 
     // Start the HR workflow
-    const result = await start(hrWorkflow, [initialState]);
+    // If workflow is already running, start() may throw or return existing runId
+    try {
+      const result = await start(hrWorkflow, [initialState]);
 
-    // Return the workflow run ID
-    const runId = result.runId;
+      // Return the workflow run ID
+      const runId = result.runId;
 
-    return NextResponse.json({
-      success: true,
-      hrId: runId,
-      message: "HR workflow started successfully",
-    });
+      return NextResponse.json({
+        success: true,
+        hrId: runId,
+        message: "HR workflow started successfully",
+      });
+    } catch (startError) {
+      // If workflow is already running, Vercel Workflows may return 503 or throw
+      const message = startError instanceof Error ? startError.message : "Unknown error";
+      
+      // If it's a 503 or similar, the workflow is likely already running
+      if (message.includes("503") || message.includes("already") || message.includes("running")) {
+        return NextResponse.json(
+          {
+            success: false,
+            error: "HR workflow may already be running",
+            message: "An HR workflow instance may already be active. Tasks will be processed by the existing instance.",
+          },
+          { status: 503 }
+        );
+      }
+
+      // Re-throw other errors
+      throw startError;
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
     const isFatal = error instanceof FatalError;

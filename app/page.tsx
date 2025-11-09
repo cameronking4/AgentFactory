@@ -74,6 +74,7 @@ interface Meeting {
   id: string;
   type: string;
   participants: string[];
+  transcript: string;
   createdAt: string;
 }
 
@@ -137,29 +138,27 @@ export default function CEODashboard() {
   const [costs, setCosts] = useState<Cost[]>([]);
   const [costAggregates, setCostAggregates] = useState<CostAggregates | null>(null);
   const [allDeliverables, setAllDeliverables] = useState<Deliverable[]>([]);
+  const [allMeetings, setAllMeetings] = useState<Meeting[]>([]);
   const [selectedTask, setSelectedTask] = useState<Task | null>(null);
   const [selectedEmployee, setSelectedEmployee] = useState<Employee | null>(null);
+  const [selectedDeliverable, setSelectedDeliverable] = useState<Deliverable | null>(null);
+  const [selectedMeeting, setSelectedMeeting] = useState<Meeting | null>(null);
   
   // Detailed views
   const [taskActivity, setTaskActivity] = useState<TaskActivity[]>([]);
   const [taskDeliverables, setTaskDeliverables] = useState<Deliverable[]>([]);
   const [taskStageTimes, setTaskStageTimes] = useState<Record<string, number>>({});
   const [employeeDetails, setEmployeeDetails] = useState<EmployeeDetails | null>(null);
-  const [viewMode, setViewMode] = useState<"tasks" | "employees" | "costs">("tasks");
+  const [viewMode, setViewMode] = useState<"tasks" | "employees" | "costs" | "deliverables" | "meetings">("tasks");
 
   // Auto-refresh
   const [autoRefresh, setAutoRefresh] = useState(true);
 
-  // Initialize HR workflow on mount (only if not already set)
+  // Initialize HR workflow on mount
   useEffect(() => {
     const initHR = async () => {
-      // Check localStorage for existing HR ID first
-      const storedHrId = localStorage.getItem("hrWorkflowId");
-      if (storedHrId) {
-        setHrId(storedHrId);
-        return; // Don't start a new workflow if one exists
-      }
-
+      // Try to start a new HR workflow instance
+      // If one is already running (503), that's fine - tasks will still be processed
       try {
         const response = await fetch("/api/hr", {
           method: "POST",
@@ -167,14 +166,26 @@ export default function CEODashboard() {
           body: JSON.stringify({}),
         });
         const data = await response.json();
+        
+        if (response.status === 503) {
+          // HR workflow already running - this is fine, tasks will be processed
+          // We can't get the existing workflow ID easily, but that's okay
+          // The system will work with the existing workflow
+          console.log("HR workflow already running, using existing instance");
+          setError(null); // Clear any previous errors
+          return;
+        }
+        
         if (data.success && data.hrId) {
           setHrId(data.hrId);
-          localStorage.setItem("hrWorkflowId", data.hrId);
+          setError(null);
+        } else {
+          setError(data.error || "Failed to initialize HR workflow");
         }
       } catch (err) {
         console.error("Error initializing HR:", err);
-        // If error (like 503), the workflow might already be running
-        // Just use the stored ID if available
+        // Don't set error for network issues - might be temporary
+        // The system can still work if an HR workflow is already running
       }
     };
     initHR();
@@ -222,6 +233,15 @@ export default function CEODashboard() {
             setAllDeliverables(deliverablesData.deliverables || []);
           }
         }
+
+        // Fetch all meetings
+        const meetingsRes = await fetch("/api/meetings");
+        if (meetingsRes.ok) {
+          const meetingsData = await meetingsRes.json();
+          if (meetingsData.success) {
+            setAllMeetings(meetingsData.meetings || []);
+          }
+        }
       } catch (err) {
         console.error("Error refreshing data:", err);
       }
@@ -230,7 +250,7 @@ export default function CEODashboard() {
     refreshData();
     const interval = setInterval(refreshData, 5000);
     return () => clearInterval(interval);
-  }, [autoRefresh]);
+  }, [autoRefresh, viewMode, selectedDeliverable, selectedMeeting]);
 
   // Load task activity when selected
   useEffect(() => {
@@ -288,8 +308,22 @@ export default function CEODashboard() {
     return () => clearInterval(interval);
   }, [selectedEmployee]);
 
+  // Auto-select first deliverable when switching to deliverables view
+  useEffect(() => {
+    if (viewMode === "deliverables" && allDeliverables.length > 0 && !selectedDeliverable) {
+      setSelectedDeliverable(allDeliverables[0]);
+    }
+  }, [viewMode, allDeliverables, selectedDeliverable]);
+
+  // Auto-select first meeting when switching to meetings view
+  useEffect(() => {
+    if (viewMode === "meetings" && allMeetings.length > 0 && !selectedMeeting) {
+      setSelectedMeeting(allMeetings[0]);
+    }
+  }, [viewMode, allMeetings, selectedMeeting]);
+
   const createTask = async () => {
-    if (!hrId || !taskTitle.trim() || !taskDescription.trim()) return;
+    if (!taskTitle.trim() || !taskDescription.trim()) return;
 
     setLoading(true);
     setError(null);
@@ -303,7 +337,6 @@ export default function CEODashboard() {
         body: JSON.stringify({
           title: taskTitle,
           description: taskDescription,
-          hrId,
         }),
       });
 
@@ -313,25 +346,34 @@ export default function CEODashboard() {
         return;
       }
 
-      // 2. Notify HR workflow about the new task
-      const hrResponse = await fetch(`/api/hr/${hrId}/task`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          taskId: data.id,
-          taskTitle: taskTitle,
-          taskDescription: taskDescription,
-        }),
-      });
+      // 2. Notify HR workflow about the new task (if we have an hrId)
+      // If we don't have an hrId, the HR workflow's proactive checkForPendingTasks will pick it up
+      if (hrId) {
+        try {
+          const hrResponse = await fetch(`/api/hr/${hrId}/task`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              taskId: data.id,
+              taskTitle: taskTitle,
+              taskDescription: taskDescription,
+            }),
+          });
 
-      const hrData = await hrResponse.json();
-      if (!hrData.success) {
-        console.warn("Task created but HR notification failed:", hrData.error);
-        setError("Task created but failed to notify HR. Task may remain pending.");
-        return;
+          const hrData = await hrResponse.json();
+          if (!hrData.success) {
+            console.warn("Task created but HR notification failed:", hrData.error);
+            // Don't fail - the proactive check will pick it up
+          }
+        } catch (hrErr) {
+          console.warn("Task created but HR notification failed:", hrErr);
+          // Don't fail - the proactive check will pick it up
+        }
+      } else {
+        console.log("Task created without HR ID - will be picked up by proactive check");
       }
 
-      setSuccess("Task created and assigned to HR!");
+      setSuccess("Task created! HR will process it shortly.");
       setTaskTitle("");
       setTaskDescription("");
       // Refresh tasks
@@ -369,8 +411,11 @@ export default function CEODashboard() {
         setEmployees([]);
         setCosts([]);
         setAllDeliverables([]);
+        setAllMeetings([]);
         setSelectedTask(null);
         setSelectedEmployee(null);
+        setSelectedDeliverable(null);
+        setSelectedMeeting(null);
       } else {
         setError(data.error || "Failed to clear database");
       }
@@ -510,10 +555,351 @@ export default function CEODashboard() {
           >
             Costs
           </button>
+          <button
+            onClick={() => {
+              setViewMode("deliverables");
+              setSelectedTask(null);
+              setSelectedEmployee(null);
+            }}
+            className={`px-4 py-2 rounded-lg border shadow font-medium ${viewMode === "deliverables" ? "ring-2" : ""}`}
+          >
+            Deliverables
+          </button>
+          <button
+            onClick={() => {
+              setViewMode("meetings");
+              setSelectedTask(null);
+              setSelectedEmployee(null);
+            }}
+            className={`px-4 py-2 rounded-lg border shadow font-medium ${viewMode === "meetings" ? "ring-2" : ""}`}
+          >
+            Meetings
+          </button>
         </div>
 
         {/* Main Content Grid */}
-        {viewMode === "costs" ? (
+        {viewMode === "deliverables" ? (
+          <div className="rounded-lg border shadow overflow-hidden">
+            {allDeliverables.length === 0 ? (
+              <div className="p-8">
+                <p className="text-center py-8">No deliverables yet. Deliverables will appear here as employees complete work.</p>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 lg:grid-cols-2 h-[calc(100vh-300px)]">
+                {/* Left Panel - Deliverables List */}
+                <div className="border-r overflow-hidden flex flex-col">
+                  <div className="p-4 border-b bg-gray-50">
+                    <h2 className="text-xl font-semibold">All Deliverables</h2>
+                    <p className="text-sm text-gray-600 mt-1">{allDeliverables.length} total</p>
+                  </div>
+                  <div className="flex-1 overflow-y-auto">
+                    {allDeliverables
+                      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+                      .map((deliverable) => {
+                        const task = tasks.find((t) => t.id === deliverable.taskId);
+                        const creator = employees.find((e) => e.id === deliverable.createdBy);
+                        const isSelected = selectedDeliverable?.id === deliverable.id;
+                        
+                        return (
+                          <div
+                            key={deliverable.id}
+                            onClick={() => setSelectedDeliverable(deliverable)}
+                            className={`p-4 border-b cursor-pointer transition-colors ${
+                              isSelected 
+                                ? "bg-blue-50 border-blue-200" 
+                                : "hover:bg-gray-50"
+                            }`}
+                          >
+                            <div className="flex items-start justify-between gap-2 mb-2">
+                              <div className="flex gap-2 items-center flex-wrap">
+                                <span className="px-2 py-1 rounded text-xs font-medium border capitalize bg-white">
+                                  {deliverable.type}
+                                </span>
+                                {deliverable.evaluationScore !== null && (
+                                  <span className="px-2 py-1 rounded text-xs font-medium border bg-green-100 text-green-800">
+                                    {deliverable.evaluationScore}/10
+                                  </span>
+                                )}
+                              </div>
+                              <span className="text-xs text-gray-500 whitespace-nowrap">
+                                {new Date(deliverable.createdAt).toLocaleDateString()}
+                              </span>
+                            </div>
+                            {task && (
+                              <div className="text-sm font-medium text-gray-900 mb-1 line-clamp-1">
+                                {task.title}
+                              </div>
+                            )}
+                            {creator && (
+                              <div className="text-xs text-gray-600">
+                                by {creator.name}
+                              </div>
+                            )}
+                            <div className="text-xs text-gray-500 mt-2 line-clamp-2">
+                              {deliverable.content.substring(0, 100)}
+                              {deliverable.content.length > 100 && "..."}
+                            </div>
+                          </div>
+                        );
+                      })}
+                  </div>
+                </div>
+
+                {/* Right Panel - Deliverable Preview */}
+                <div className="overflow-hidden flex flex-col bg-white">
+                  {selectedDeliverable ? (
+                    <>
+                      <div className="p-6 border-b bg-gray-50">
+                        <div className="flex items-start justify-between gap-4 mb-4">
+                          <div className="flex-1">
+                            <div className="flex gap-2 items-center mb-2">
+                              <span className="px-3 py-1 rounded text-sm font-medium border capitalize bg-white">
+                                {selectedDeliverable.type}
+                              </span>
+                              {selectedDeliverable.evaluationScore !== null && (
+                                <span className="px-3 py-1 rounded text-sm font-medium border bg-green-100 text-green-800">
+                                  Score: {selectedDeliverable.evaluationScore}/10
+                                </span>
+                              )}
+                            </div>
+                            {(() => {
+                              const task = tasks.find((t) => t.id === selectedDeliverable.taskId);
+                              return task ? (
+                                <h3 className="text-lg font-semibold text-gray-900 mb-2">
+                                  {task.title}
+                                </h3>
+                              ) : null;
+                            })()}
+                          </div>
+                          <span className="text-sm text-gray-500 whitespace-nowrap">
+                            {new Date(selectedDeliverable.createdAt).toLocaleString()}
+                          </span>
+                        </div>
+                        
+                        <div className="grid grid-cols-2 gap-4 text-sm">
+                          {(() => {
+                            const task = tasks.find((t) => t.id === selectedDeliverable.taskId);
+                            return task ? (
+                              <div>
+                                <span className="text-gray-600">Task: </span>
+                                <span 
+                                  className="text-blue-600 cursor-pointer hover:underline font-medium"
+                                  onClick={() => {
+                                    setSelectedTask(task);
+                                    setViewMode("tasks");
+                                  }}
+                                >
+                                  {task.title}
+                                </span>
+                              </div>
+                            ) : null;
+                          })()}
+                          {(() => {
+                            const creator = employees.find((e) => e.id === selectedDeliverable.createdBy);
+                            return creator ? (
+                              <div>
+                                <span className="text-gray-600">Created by: </span>
+                                <span 
+                                  className="text-blue-600 cursor-pointer hover:underline font-medium"
+                                  onClick={() => {
+                                    setSelectedEmployee(creator);
+                                    setViewMode("employees");
+                                  }}
+                                >
+                                  {creator.name}
+                                </span>
+                              </div>
+                            ) : null;
+                          })()}
+                          {(() => {
+                            const evaluator = selectedDeliverable.evaluatedBy 
+                              ? employees.find((e) => e.id === selectedDeliverable.evaluatedBy) 
+                              : null;
+                            return evaluator ? (
+                              <div>
+                                <span className="text-gray-600">Evaluated by: </span>
+                                <span 
+                                  className="text-blue-600 cursor-pointer hover:underline font-medium"
+                                  onClick={() => {
+                                    setSelectedEmployee(evaluator);
+                                    setViewMode("employees");
+                                  }}
+                                >
+                                  {evaluator.name}
+                                </span>
+                              </div>
+                            ) : null;
+                          })()}
+                        </div>
+                        
+                        {selectedDeliverable.feedback && (
+                          <div className="mt-4 p-3 rounded-lg bg-yellow-50 border border-yellow-200">
+                            <div className="text-sm font-medium text-yellow-900 mb-1">Feedback:</div>
+                            <div className="text-sm text-yellow-800">{selectedDeliverable.feedback}</div>
+                          </div>
+                        )}
+                      </div>
+                      
+                      <div className="flex-1 overflow-y-auto p-6">
+                        <div className="mb-4">
+                          <h4 className="text-sm font-semibold text-gray-700 mb-2">Content</h4>
+                        </div>
+                        <div className="rounded-lg border bg-gray-50 p-4">
+                          <pre className="text-sm whitespace-pre-wrap font-mono overflow-x-auto text-gray-900">
+                            {selectedDeliverable.content}
+                          </pre>
+                        </div>
+                      </div>
+                    </>
+                  ) : (
+                    <div className="flex-1 flex items-center justify-center text-gray-500">
+                      <div className="text-center">
+                        <p className="text-lg mb-2">Select a deliverable</p>
+                        <p className="text-sm">Choose an item from the list to view its content</p>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        ) : viewMode === "meetings" ? (
+          <div className="rounded-lg border shadow overflow-hidden">
+            {allMeetings.length === 0 ? (
+              <div className="p-8">
+                <p className="text-center py-8">No meetings yet. Meetings will appear here as they are conducted.</p>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 lg:grid-cols-2 h-[calc(100vh-300px)]">
+                {/* Left Panel - Meetings List */}
+                <div className="border-r overflow-hidden flex flex-col">
+                  <div className="p-4 border-b bg-gray-50">
+                    <h2 className="text-xl font-semibold">All Meetings</h2>
+                    <p className="text-sm text-gray-600 mt-1">{allMeetings.length} total</p>
+                  </div>
+                  <div className="flex-1 overflow-y-auto">
+                    {allMeetings
+                      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+                      .map((meeting) => {
+                        const isSelected = selectedMeeting?.id === meeting.id;
+                        const participantNames = meeting.participants
+                          .map((pid) => {
+                            const emp = employees.find((e) => e.id === pid);
+                            return emp?.name || pid.slice(0, 8) + "...";
+                          })
+                          .join(", ");
+                        
+                        return (
+                          <div
+                            key={meeting.id}
+                            onClick={() => setSelectedMeeting(meeting)}
+                            className={`p-4 border-b cursor-pointer transition-colors ${
+                              isSelected 
+                                ? "bg-blue-50 border-blue-200" 
+                                : "hover:bg-gray-50"
+                            }`}
+                          >
+                            <div className="flex items-start justify-between gap-2 mb-2">
+                              <div className="flex gap-2 items-center flex-wrap">
+                                <span className="px-2 py-1 rounded text-xs font-medium border capitalize bg-white">
+                                  {meeting.type}
+                                </span>
+                              </div>
+                              <span className="text-xs text-gray-500 whitespace-nowrap">
+                                {new Date(meeting.createdAt).toLocaleDateString()}
+                              </span>
+                            </div>
+                            <div className="text-xs text-gray-600 mb-2">
+                              {meeting.participants.length} participant{meeting.participants.length !== 1 ? "s" : ""}
+                            </div>
+                            <div className="text-xs text-gray-500 line-clamp-2">
+                              {participantNames}
+                            </div>
+                            <div className="text-xs text-gray-400 mt-2 line-clamp-1">
+                              {meeting.transcript.substring(0, 80)}
+                              {meeting.transcript.length > 80 && "..."}
+                            </div>
+                          </div>
+                        );
+                      })}
+                  </div>
+                </div>
+
+                {/* Right Panel - Meeting Transcript Preview */}
+                <div className="overflow-hidden flex flex-col bg-white">
+                  {selectedMeeting ? (
+                    <>
+                      <div className="p-6 border-b bg-gray-50">
+                        <div className="flex items-start justify-between gap-4 mb-4">
+                          <div className="flex-1">
+                            <div className="flex gap-2 items-center mb-2">
+                              <span className="px-3 py-1 rounded text-sm font-medium border capitalize bg-white">
+                                {selectedMeeting.type}
+                              </span>
+                            </div>
+                            <h3 className="text-lg font-semibold text-gray-900 mb-2">
+                              Meeting Transcript
+                            </h3>
+                          </div>
+                          <span className="text-sm text-gray-500 whitespace-nowrap">
+                            {new Date(selectedMeeting.createdAt).toLocaleString()}
+                          </span>
+                        </div>
+                        
+                        <div className="text-sm">
+                          <span className="text-gray-600 font-medium">Participants: </span>
+                          <span className="text-gray-900">
+                            {selectedMeeting.participants.map((pid, idx) => {
+                              const emp = employees.find((e) => e.id === pid);
+                              return (
+                                <span key={pid}>
+                                  {idx > 0 && ", "}
+                                  {emp ? (
+                                    <span
+                                      className="text-blue-600 cursor-pointer hover:underline font-medium"
+                                      onClick={() => {
+                                        setSelectedEmployee(emp);
+                                        setViewMode("employees");
+                                      }}
+                                    >
+                                      {emp.name}
+                                    </span>
+                                  ) : (
+                                    <span className="text-gray-500">
+                                      {pid.slice(0, 8)}...
+                                    </span>
+                                  )}
+                                </span>
+                              );
+                            })}
+                          </span>
+                        </div>
+                      </div>
+                      
+                      <div className="flex-1 overflow-y-auto p-6">
+                        <div className="mb-4">
+                          <h4 className="text-sm font-semibold text-gray-700 mb-2">Transcript</h4>
+                        </div>
+                        <div className="rounded-lg border bg-gray-50 p-4">
+                          <div className="text-sm whitespace-pre-wrap text-gray-900 leading-relaxed">
+                            {selectedMeeting.transcript}
+                          </div>
+                        </div>
+                      </div>
+                    </>
+                  ) : (
+                    <div className="flex-1 flex items-center justify-center text-gray-500">
+                      <div className="text-center">
+                        <p className="text-lg mb-2">Select a meeting</p>
+                        <p className="text-sm">Choose an item from the list to view its transcript</p>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        ) : viewMode === "costs" ? (
           <div className="rounded-lg border shadow p-6">
             <h2 className="text-2xl font-semibold mb-6">Cost Breakdown</h2>
             

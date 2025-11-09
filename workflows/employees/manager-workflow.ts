@@ -2,7 +2,7 @@ import { defineHook, getWorkflowMetadata, fetch, sleep } from "workflow";
 import { generateText } from "ai";
 import { db } from "@/lib/db";
 import { employees, tasks, deliverables, memories } from "@/lib/db/schema";
-import { eq, and, desc, inArray, isNull } from "drizzle-orm";
+import { eq, and, desc, inArray, isNull, or } from "drizzle-orm";
 import { icTaskHook } from "@/workflows/employees/ic-workflow";
 import { trackAICost } from "@/lib/ai/cost-tracking";
 import "dotenv/config";
@@ -80,6 +80,14 @@ export async function managerWorkflow(initialState: ManagerState) {
 
   // Main loop: process events and proactively check for completed tasks
   while (true) {
+    // Proactive: Self-healing - Ensure IC workflows are running for direct reports with active tasks
+    try {
+      await ensureDirectReportWorkflowsRunning(managerId);
+    } catch (err) {
+      console.error(`[Manager ${managerId}] Error in ensureDirectReportWorkflowsRunning:`, err);
+      // Continue loop even if check fails
+    }
+
     // Proactive: Check for completed tasks from direct reports that need review
     await checkForCompletedTasks(managerId);
 
@@ -783,6 +791,101 @@ async function setManagerState(
   // State is primarily stored in database (employees, deliverables tables)
   // This function is mainly for in-memory caching if needed
   // For MVP, we'll rely on database queries
+}
+
+/**
+ * Self-healing: Ensures IC workflows are running for direct reports with active tasks
+ * Managers proactively ensure their team members are working
+ */
+async function ensureDirectReportWorkflowsRunning(managerId: string) {
+  "use step";
+
+  try {
+    // Only check occasionally (not every loop) - 15% chance per loop
+    if (Math.random() > 0.15) return;
+
+    const state = await getManagerState(managerId);
+    if (!state || state.directReports.length === 0) return;
+
+    // Get all direct reports with active tasks
+    const directReportsWithTasks = await db
+      .select({
+        employeeId: tasks.assignedTo,
+      })
+      .from(tasks)
+      .where(
+        and(
+          inArray(tasks.assignedTo, state.directReports),
+          or(
+            eq(tasks.status, "pending"),
+            eq(tasks.status, "in-progress")
+          )
+        )
+      )
+      .groupBy(tasks.assignedTo);
+
+    const icIdsWithTasks = new Set(
+      directReportsWithTasks
+        .map((t) => t.employeeId)
+        .filter((id): id is string => id !== null)
+    );
+
+    // For each direct report with active tasks, ensure their workflow is running
+    for (const icId of state.directReports) {
+      if (!icIdsWithTasks.has(icId)) continue;
+
+      // Check if employee has been active recently (indicates workflow might be running)
+      const [icEmployee] = await db
+        .select()
+        .from(employees)
+        .where(eq(employees.id, icId))
+        .limit(1);
+
+      if (!icEmployee) continue;
+
+      // Check if employee has been updated recently (within last 2 minutes)
+      const lastUpdated = icEmployee.updatedAt 
+        ? new Date(icEmployee.updatedAt).getTime() 
+        : 0;
+      const twoMinutesAgo = Date.now() - 2 * 60 * 1000;
+      const shouldStartWorkflow = lastUpdated < twoMinutesAgo;
+
+      if (shouldStartWorkflow) {
+        console.log(
+          `[Manager ${managerId}] Self-healing: Starting IC workflow for direct report ${icId} (${icEmployee.name}) with active tasks`
+        );
+
+        try {
+          const baseUrl = process.env.NEXT_PUBLIC_APP_URL || 
+            (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'http://localhost:3000');
+          const response = await fetch(`${baseUrl}/api/employees/${icId}/start`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+          });
+
+          if (response.ok) {
+            const result = await response.json();
+            console.log(
+              `[Manager ${managerId}] Self-healing: Started IC workflow for ${icId}: ${result.workflowRunId}`
+            );
+          } else {
+            console.warn(
+              `[Manager ${managerId}] Self-healing: Failed to start IC workflow for ${icId}: ${response.status}`
+            );
+          }
+        } catch (error) {
+          console.error(
+            `[Manager ${managerId}] Self-healing: Error starting IC workflow for ${icId}:`,
+            error
+          );
+          // Continue - will retry on next check
+        }
+      }
+    }
+  } catch (error) {
+    console.error(`[Manager ${managerId}] Error in ensureDirectReportWorkflowsRunning:`, error);
+    // Don't throw - this is a self-healing mechanism
+  }
 }
 
 /**
