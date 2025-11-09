@@ -1,10 +1,11 @@
 import { defineHook, getWorkflowMetadata, fetch, sleep } from "workflow";
 import { generateText } from "ai";
 import { db } from "@/lib/db";
-import { employees, tasks, deliverables, memories } from "@/lib/db/schema";
-import { eq, and, desc, inArray, isNull, or } from "drizzle-orm";
+import { employees, tasks, deliverables, memories, reports, reportResponses, meetings } from "@/lib/db/schema";
+import { eq, and, desc, inArray, isNull, or, gte, lte } from "drizzle-orm";
 import { icTaskHook } from "@/workflows/employees/ic-workflow";
 import { trackAICost } from "@/lib/ai/cost-tracking";
+import { get as redisGet, set as redisSet } from "@/lib/redis";
 import "dotenv/config";
 
 // Manager Workflow State
@@ -27,6 +28,9 @@ export type ManagerEvent =
   | { type: "assignIC"; icId: string } // Assign an IC to this manager
   | { type: "unassignIC"; icId: string } // Unassign an IC from this manager
   | { type: "requestWork"; icId: string } // IC is requesting more work
+  | { type: "generateReport" } // Generate report to CEO (every other day)
+  | { type: "ceoResponse"; reportId: string; response: string } // CEO responded to a report
+  | { type: "createTaskFromReport"; reportId: string } // Create tasks based on report/CEO feedback
   | { type: "getStatus" };
 
 // Define hooks for type safety
@@ -97,6 +101,9 @@ export async function managerWorkflow(initialState: ManagerState) {
     // Proactive: Build memory from evaluations and feedback
     await buildManagerMemory(managerId);
 
+    // Proactive: Check if it's time to generate report (every other day)
+    await checkAndGenerateReport(managerId);
+
     // Reactive: Process evaluation requests
     const eventPromise = (async () => {
   for await (const event of receiveEvaluation) {
@@ -137,6 +144,15 @@ export async function managerWorkflow(initialState: ManagerState) {
             break;
           case "requestWork":
             await handleRequestWork(managerId, event.icId);
+            break;
+          case "generateReport":
+            await handleGenerateReport(managerId);
+            break;
+          case "ceoResponse":
+            await handleCEOResponse(managerId, event.reportId, event.response);
+            break;
+          case "createTaskFromReport":
+            await handleCreateTaskFromReport(managerId, event.reportId);
             break;
         case "getStatus":
           // Just return current state
@@ -742,6 +758,29 @@ async function getManagerState(managerId: string): Promise<ManagerState | null> 
   "use step";
 
   try {
+    // Try to get from Redis cache first
+    try {
+      const cachedState = await redisGet(`manager:state:${managerId}`);
+      if (cachedState) {
+        const parsed = JSON.parse(cachedState) as ManagerState;
+        // Validate the cached state is still valid by checking if manager exists
+        const [employee] = await db
+          .select()
+          .from(employees)
+          .where(eq(employees.id, managerId))
+          .limit(1);
+        
+        if (employee && employee.role === "manager") {
+          // Update lastActive and return cached state
+          parsed.lastActive = new Date().toISOString();
+          return parsed;
+        }
+      }
+    } catch (redisError) {
+      // If Redis fails, fall back to database
+      console.warn(`[Manager ${managerId}] Redis cache miss or error, falling back to database:`, redisError);
+    }
+
     // Get manager from database
     const [employee] = await db
       .select()
@@ -767,7 +806,7 @@ async function getManagerState(managerId: string): Promise<ManagerState | null> 
     
     const directReports = directReportEmployees.map((e) => e.id);
 
-    return {
+    const state: ManagerState = {
       managerId,
       name: employee.name,
       role: "manager",
@@ -776,6 +815,16 @@ async function getManagerState(managerId: string): Promise<ManagerState | null> 
       createdAt: employee.createdAt.toISOString(),
       lastActive: new Date().toISOString(),
     };
+
+    // Cache in Redis (expires in 1 hour)
+    try {
+      await redisSet(`manager:state:${managerId}`, JSON.stringify(state), { ex: 3600 });
+    } catch (redisError) {
+      // Non-fatal - continue even if Redis caching fails
+      console.warn(`[Manager ${managerId}] Failed to cache state in Redis:`, redisError);
+    }
+
+    return state;
   } catch (error) {
     console.error(`Error getting manager state:`, error);
     return null;
@@ -783,14 +832,33 @@ async function getManagerState(managerId: string): Promise<ManagerState | null> 
 }
 
 async function setManagerState(
-  _managerId: string,
-  _state: ManagerState
+  managerId: string,
+  state: ManagerState
 ): Promise<void> {
   "use step";
 
-  // State is primarily stored in database (employees, deliverables tables)
-  // This function is mainly for in-memory caching if needed
-  // For MVP, we'll rely on database queries
+  try {
+    // Update lastActive timestamp
+    const updatedState: ManagerState = {
+      ...state,
+      lastActive: new Date().toISOString(),
+    };
+
+    // Store in Redis cache (expires in 1 hour)
+    try {
+      await redisSet(`manager:state:${managerId}`, JSON.stringify(updatedState), { ex: 3600 });
+    } catch (redisError) {
+      // Non-fatal - continue even if Redis caching fails
+      console.warn(`[Manager ${managerId}] Failed to cache state in Redis:`, redisError);
+    }
+
+    // State is also stored in database (employees, deliverables tables)
+    // The database is the source of truth, Redis is just for fast access
+    // Direct reports and evaluated deliverables are stored in the database tables
+  } catch (error) {
+    console.error(`[Manager ${managerId}] Error setting manager state:`, error);
+    // Don't throw - state management should be resilient
+  }
 }
 
 /**
@@ -1061,6 +1129,527 @@ Respond in JSON:
     );
   } catch (error) {
     console.error(`[Manager ${managerId}] Error building memory:`, error);
+  }
+}
+
+/**
+ * Checks if it's time to generate a report (every other day) and generates it
+ */
+async function checkAndGenerateReport(managerId: string) {
+  "use step";
+
+  try {
+    // Only check occasionally (not every loop) - 5% chance per loop
+    if (Math.random() > 0.05) return;
+
+    const state = await getManagerState(managerId);
+    if (!state || state.directReports.length === 0) return;
+
+    // Get the most recent report for this manager
+    const recentReports = await db
+      .select()
+      .from(reports)
+      .where(eq(reports.managerId, managerId))
+      .orderBy(desc(reports.createdAt))
+      .limit(1);
+
+    const now = new Date();
+    let shouldGenerate = false;
+
+    if (recentReports.length === 0) {
+      // No reports yet - generate first one
+      shouldGenerate = true;
+    } else {
+      const lastReport = recentReports[0];
+      const lastReportDate = new Date(lastReport.createdAt);
+      const daysSinceLastReport = (now.getTime() - lastReportDate.getTime()) / (1000 * 60 * 60 * 24);
+      
+      // Generate report every other day (2 days)
+      if (daysSinceLastReport >= 2) {
+        shouldGenerate = true;
+      }
+    }
+
+    if (shouldGenerate) {
+      await handleGenerateReport(managerId);
+    }
+  } catch (error) {
+    console.error(`[Manager ${managerId}] Error checking for report generation:`, error);
+  }
+}
+
+/**
+ * Generates a report to CEO based on scrums, completed work, and manager memories
+ */
+async function handleGenerateReport(managerId: string) {
+  "use step";
+
+  console.log(`[Manager ${managerId}] Generating report to CEO`);
+
+  try {
+    const state = await getManagerState(managerId);
+    if (!state) {
+      console.error(`[Manager ${managerId}] Manager state not found`);
+      return;
+    }
+
+    // Get manager employee record
+    const [manager] = await db
+      .select()
+      .from(employees)
+      .where(eq(employees.id, managerId))
+      .limit(1);
+
+    if (!manager) {
+      console.error(`[Manager ${managerId}] Manager not found`);
+      return;
+    }
+
+    // Get CEO (first CEO employee)
+    const [ceo] = await db
+      .select()
+      .from(employees)
+      .where(eq(employees.role, "ceo"))
+      .limit(1);
+
+    if (!ceo) {
+      console.warn(`[Manager ${managerId}] No CEO found - skipping report generation`);
+      return;
+    }
+
+    // Calculate report period (last 2 days)
+    const now = new Date();
+    const periodEnd = now;
+    const periodStart = new Date(now.getTime() - 2 * 24 * 60 * 60 * 1000); // 2 days ago
+
+    // Get standup meetings from the last 2 days
+    const recentStandups = await db
+      .select()
+      .from(meetings)
+      .where(
+        and(
+          eq(meetings.type, "standup"),
+          gte(meetings.createdAt, periodStart),
+          lte(meetings.createdAt, periodEnd)
+        )
+      )
+      .orderBy(desc(meetings.createdAt));
+
+    // Filter standups that include this manager or their direct reports
+    const relevantStandups = recentStandups.filter((meeting) => {
+      const participants = meeting.participants || [];
+      return participants.includes(managerId) || 
+             state.directReports.some((dr) => participants.includes(dr));
+    });
+
+    // Get completed tasks from direct reports in the last 2 days
+    const completedTasks = await db
+      .select()
+      .from(tasks)
+      .where(
+        and(
+          inArray(tasks.assignedTo, state.directReports),
+          eq(tasks.status, "completed"),
+          gte(tasks.completedAt || tasks.updatedAt, periodStart),
+          lte(tasks.completedAt || tasks.updatedAt, periodEnd)
+        )
+      );
+
+    // Get manager memories from the last 2 days
+    const recentMemories = await db
+      .select()
+      .from(memories)
+      .where(
+        and(
+          eq(memories.employeeId, managerId),
+          gte(memories.createdAt, periodStart),
+          lte(memories.createdAt, periodEnd)
+        )
+      )
+      .orderBy(desc(memories.createdAt))
+      .limit(50);
+
+    // Get deliverables from completed tasks
+    const taskIds = completedTasks.map((t) => t.id);
+    const taskDeliverables = taskIds.length > 0
+      ? await db
+          .select()
+          .from(deliverables)
+          .where(inArray(deliverables.taskId, taskIds))
+      : [];
+
+    // Generate report using AI
+    const reportContent = await generateReportContent(
+      managerId,
+      manager.name,
+      state.directReports,
+      relevantStandups,
+      completedTasks,
+      taskDeliverables,
+      recentMemories,
+      periodStart,
+      periodEnd
+    );
+
+    // Create report in database
+    const [report] = await db
+      .insert(reports)
+      .values({
+        managerId: managerId,
+        ceoId: ceo.id,
+        title: `Team Status Report - ${periodStart.toLocaleDateString()} to ${periodEnd.toLocaleDateString()}`,
+        content: reportContent,
+        status: "submitted",
+        periodStart,
+        periodEnd,
+        submittedAt: now,
+      })
+      .returning();
+
+    // Store report generation in memory
+    await db.insert(memories).values({
+      employeeId: managerId,
+      type: "interaction",
+      content: `Generated and submitted report to CEO: ${report.id}`,
+      importance: "0.8",
+    });
+
+    // Notify CEO workflow about the new report (if CEO workflow exists)
+    // This will be handled by the CEO workflow hook
+
+    console.log(`[Manager ${managerId}] Generated report ${report.id} to CEO`);
+  } catch (error) {
+    console.error(`[Manager ${managerId}] Error generating report:`, error);
+  }
+}
+
+/**
+ * Generates report content using AI
+ */
+async function generateReportContent(
+  managerId: string,
+  managerName: string,
+  directReportIds: string[],
+  standups: Array<{ id: string; transcript: string; createdAt: Date }>,
+  completedTasks: Array<{ id: string; title: string; description: string; completedAt: Date | null }>,
+  deliverables: Array<{ id: string; type: string; content: string }>,
+  memories: Array<{ content: string; importance: string }>,
+  periodStart: Date,
+  periodEnd: Date
+): Promise<string> {
+  "use step";
+
+  try {
+    // Get direct report names
+    const directReports = await db
+      .select()
+      .from(employees)
+      .where(inArray(employees.id, directReportIds));
+
+    const directReportNames = directReports.map((dr) => dr.name).join(", ");
+
+    // Build context for report generation
+    const standupSummary = standups.length > 0
+      ? standups.map((s) => `- ${s.createdAt.toLocaleDateString()}: ${s.transcript.substring(0, 200)}...`).join("\n")
+      : "No standup meetings in this period";
+
+    const taskSummary = completedTasks.length > 0
+      ? completedTasks.map((t) => `- ${t.title}: ${t.description.substring(0, 100)}...`).join("\n")
+      : "No completed tasks in this period";
+
+    const memorySummary = memories.length > 0
+      ? memories.slice(0, 10).map((m) => `- ${m.content.substring(0, 150)}...`).join("\n")
+      : "No significant memories in this period";
+
+    const prompt = `You are a manager (${managerName}) generating a status report for the CEO.
+
+Report Period: ${periodStart.toLocaleDateString()} to ${periodEnd.toLocaleDateString()}
+
+Team Members: ${directReportNames}
+
+Standup Meetings Summary:
+${standupSummary}
+
+Completed Work:
+${taskSummary}
+
+Key Memories/Insights:
+${memorySummary}
+
+Generate a comprehensive status report that includes:
+1. Team Overview - Summary of team activity and progress
+2. Completed Work - Key deliverables and accomplishments
+3. Standup Highlights - Important points from daily standups
+4. Challenges/Blockers - Any issues or blockers the team is facing
+5. Next Steps - Plans for the upcoming period
+6. Questions for CEO - Any questions or guidance needed
+
+Format the report in a clear, professional manner suitable for executive review.`;
+
+    const result = await generateText({
+      model: 'openai/gpt-4.1' as never,
+      prompt,
+    });
+
+    // Track cost
+    await trackAICost(result, {
+      employeeId: managerId,
+      taskId: null,
+      model: "openai/gpt-4.1",
+      operation: "report_generation",
+    });
+
+    return result.text;
+  } catch (error) {
+    console.error(`[Manager ${managerId}] Error generating report content:`, error);
+    return `Error generating report: ${error instanceof Error ? error.message : "Unknown error"}`;
+  }
+}
+
+/**
+ * Handles CEO response to a report
+ */
+async function handleCEOResponse(managerId: string, reportId: string, response: string) {
+  "use step";
+
+  console.log(`[Manager ${managerId}] Received CEO response to report ${reportId}`);
+
+  try {
+    // Get the report
+    const [report] = await db
+      .select()
+      .from(reports)
+      .where(eq(reports.id, reportId))
+      .limit(1);
+
+    if (!report || report.managerId !== managerId) {
+      console.error(`[Manager ${managerId}] Report ${reportId} not found or not owned by manager`);
+      return;
+    }
+
+    // Store CEO response
+    await db.insert(reportResponses).values({
+      reportId: reportId,
+      ceoId: report.ceoId || "",
+      response: response,
+    });
+
+    // Update report status
+    await db
+      .update(reports)
+      .set({
+        status: "responded",
+        updatedAt: new Date(),
+      })
+      .where(eq(reports.id, reportId));
+
+    // Store CEO response in manager memory
+    await db.insert(memories).values({
+      employeeId: managerId,
+      type: "interaction",
+      content: `CEO responded to report ${reportId}: ${response.substring(0, 500)}`,
+      importance: "0.9",
+    });
+
+    // Automatically create tasks from CEO response if needed
+    await handleCreateTaskFromReport(managerId, reportId);
+
+    console.log(`[Manager ${managerId}] Processed CEO response to report ${reportId}`);
+  } catch (error) {
+    console.error(`[Manager ${managerId}] Error handling CEO response:`, error);
+  }
+}
+
+/**
+ * Creates tasks based on report, scrums, and CEO feedback
+ */
+async function handleCreateTaskFromReport(managerId: string, reportId: string) {
+  "use step";
+
+  console.log(`[Manager ${managerId}] Creating tasks from report ${reportId}`);
+
+  try {
+    const state = await getManagerState(managerId);
+    if (!state) {
+      console.error(`[Manager ${managerId}] Manager state not found`);
+      return;
+    }
+
+    // Get the report
+    const [report] = await db
+      .select()
+      .from(reports)
+      .where(eq(reports.id, reportId))
+      .limit(1);
+
+    if (!report || report.managerId !== managerId) {
+      console.error(`[Manager ${managerId}] Report ${reportId} not found or not owned by manager`);
+      return;
+    }
+
+    // Get CEO responses to this report
+    const ceoResponses = await db
+      .select()
+      .from(reportResponses)
+      .where(eq(reportResponses.reportId, reportId));
+
+    // Get recent standups
+    const recentStandups = await db
+      .select()
+      .from(meetings)
+      .where(
+        and(
+          eq(meetings.type, "standup"),
+          gte(meetings.createdAt, report.periodStart),
+          lte(meetings.createdAt, report.periodEnd)
+        )
+      );
+
+    // Use AI to extract actionable tasks from report, CEO responses, and standups
+    const extractedTasks = await extractTasksFromReport(
+      managerId,
+      report,
+      ceoResponses,
+      recentStandups,
+      state.directReports
+    );
+
+    // Create tasks in database
+    for (const task of extractedTasks) {
+      await db.insert(tasks).values({
+        title: task.title,
+        description: task.description,
+        assignedTo: task.assignedTo || null,
+        priority: task.priority,
+        status: "pending",
+      });
+
+      // If assigned, notify IC
+      if (task.assignedTo) {
+        try {
+          await icTaskHook.resume(`ic:${task.assignedTo}:tasks`, {
+            type: "newTask",
+            taskId: task.id || "",
+          });
+        } catch (hookError) {
+          console.warn(`[Manager ${managerId}] Could not notify IC about new task:`, hookError);
+        }
+      }
+    }
+
+    // Store task creation in memory
+    await db.insert(memories).values({
+      employeeId: managerId,
+      type: "task",
+      content: `Created ${extractedTasks.length} tasks from report ${reportId} based on CEO feedback and standups`,
+      importance: "0.8",
+    });
+
+    console.log(`[Manager ${managerId}] Created ${extractedTasks.length} tasks from report ${reportId}`);
+  } catch (error) {
+    console.error(`[Manager ${managerId}] Error creating tasks from report:`, error);
+  }
+}
+
+/**
+ * Extracts actionable tasks from report, CEO responses, and standups using AI
+ */
+async function extractTasksFromReport(
+  managerId: string,
+  report: { id: string; content: string; title: string },
+  ceoResponses: Array<{ response: string }>,
+  standups: Array<{ transcript: string }>,
+  directReportIds: string[]
+): Promise<Array<{ id?: string; title: string; description: string; assignedTo: string | null; priority: "low" | "medium" | "high" | "critical" }>> {
+  "use step";
+
+  try {
+    // Get direct reports for assignment suggestions
+    const directReports = await db
+      .select()
+      .from(employees)
+      .where(inArray(employees.id, directReportIds));
+
+    const directReportInfo = directReports.map((dr) => `${dr.id}: ${dr.name} (${dr.skills.join(", ")})`).join("\n");
+
+    const ceoResponseText = ceoResponses.length > 0
+      ? ceoResponses.map((r) => r.response).join("\n\n")
+      : "No CEO responses yet";
+
+    const standupText = standups.length > 0
+      ? standups.map((s) => s.transcript.substring(0, 300)).join("\n\n---\n\n")
+      : "No standup meetings";
+
+    const prompt = `You are a manager analyzing a report, CEO feedback, and standup meetings to create actionable tasks.
+
+Report Title: ${report.title}
+Report Content:
+${report.content.substring(0, 2000)}
+
+CEO Responses:
+${ceoResponseText.substring(0, 1000)}
+
+Standup Meetings:
+${standupText.substring(0, 1500)}
+
+Available Team Members:
+${directReportInfo}
+
+Extract actionable tasks from:
+1. CEO directives and questions
+2. Action items mentioned in standups
+3. Follow-up work needed from the report
+4. Blockers that need to be addressed
+
+For each task, determine:
+- Clear title and description
+- Priority (low, medium, high, critical)
+- Which team member should be assigned (use their ID, or null if unassigned)
+
+Return a JSON array:
+[
+  {
+    "title": "task title",
+    "description": "detailed description",
+    "assignedTo": "employeeId or null",
+    "priority": "low" | "medium" | "high" | "critical"
+  }
+]
+
+Only create tasks that are truly actionable and necessary.`;
+
+    const result = await generateText({
+      model: 'openai/gpt-4.1' as never,
+      prompt,
+    });
+
+    // Track cost
+    await trackAICost(result, {
+      employeeId: managerId,
+      taskId: null,
+      model: "openai/gpt-4.1",
+      operation: "task_extraction_from_report",
+    });
+
+    // Parse JSON response
+    let text = result.text.trim();
+    if (text.startsWith("```json")) {
+      text = text.replace(/^```json\n?/, "").replace(/\n?```$/, "");
+    } else if (text.startsWith("```")) {
+      text = text.replace(/^```\n?/, "").replace(/\n?```$/, "");
+    }
+
+    const extractedTasks = JSON.parse(text) as Array<{
+      title: string;
+      description: string;
+      assignedTo: string | null;
+      priority: "low" | "medium" | "high" | "critical";
+    }>;
+
+    return extractedTasks;
+  } catch (error) {
+    console.error(`[Manager ${managerId}] Error extracting tasks:`, error);
+    return [];
   }
 }
 

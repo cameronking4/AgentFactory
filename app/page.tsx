@@ -1,6 +1,12 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import { Card, CardContent } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import { CheckSquare, Users, FileText, DollarSign } from "lucide-react";
 
 interface Task {
   id: string;
@@ -131,6 +137,7 @@ export default function CEODashboard() {
   // Task input
   const [taskTitle, setTaskTitle] = useState("");
   const [taskDescription, setTaskDescription] = useState("");
+  const [taskDialogOpen, setTaskDialogOpen] = useState(false);
   
   // Data
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -376,6 +383,7 @@ export default function CEODashboard() {
       setSuccess("Task created! HR will process it shortly.");
       setTaskTitle("");
       setTaskDescription("");
+      setTaskDialogOpen(false);
       // Refresh tasks
       const tasksRes = await fetch("/api/tasks");
       if (tasksRes.ok) {
@@ -441,13 +449,70 @@ export default function CEODashboard() {
       <div className="container mx-auto px-4 py-8 max-w-7xl">
         {/* Header */}
         <div className="mb-8">
-          <h1 className="text-4xl font-bold mb-2">CEO Dashboard</h1>
-          <p className="text-lg">AI Agent Factory - Monitor and manage your autonomous workforce</p>
-          {hrId && (
-            <p className="text-sm mt-1">
-              Agent Resources Workflow: <code className="px-2 py-1 rounded border">{hrId.slice(0, 20)}...</code>
-            </p>
-          )}
+          <div className="flex justify-between items-start mb-2">
+            <div>
+              <h1 className="text-4xl font-bold mb-2">CEO Dashboard</h1>
+              <p className="text-lg">AI Agent Factory - Monitor and manage your autonomous workforce</p>
+              {hrId && (
+                <p className="text-sm mt-1">
+                  Agent Resources Workflow: <code className="px-2 py-1 rounded border">{hrId.slice(0, 20)}...</code>
+                </p>
+              )}
+            </div>
+            <div className="flex gap-2">
+              <Dialog open={taskDialogOpen} onOpenChange={setTaskDialogOpen}>
+                <DialogTrigger asChild>
+                  <Button>Create Task</Button>
+                </DialogTrigger>
+                <DialogContent className="sm:max-w-[600px]">
+                  <DialogHeader>
+                    <DialogTitle>Create New Task</DialogTitle>
+                  </DialogHeader>
+                  <div className="space-y-4 mt-4">
+                    <div>
+                      <label className="block text-sm font-medium mb-2">Task Title</label>
+                      <input
+                        type="text"
+                        value={taskTitle}
+                        onChange={(e) => setTaskTitle(e.target.value)}
+                        placeholder="e.g., Build a Next.js blog platform"
+                        className="w-full px-4 py-2 rounded-lg border focus:outline-none focus:ring-2"
+                        disabled={loading || !hrId}
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium mb-2">Task Description</label>
+                      <textarea
+                        value={taskDescription}
+                        onChange={(e) => setTaskDescription(e.target.value)}
+                        placeholder="Describe the task in detail..."
+                        rows={4}
+                        className="w-full px-4 py-2 rounded-lg border focus:outline-none focus:ring-2"
+                        disabled={loading || !hrId}
+                      />
+                    </div>
+                    <div className="flex gap-4 justify-end">
+                      <Button
+                        onClick={createTask}
+                        disabled={loading || !hrId || !taskTitle.trim() || !taskDescription.trim()}
+                      >
+                        {loading ? "Creating Task..." : "Create Task & Assign to AR (Agent Resources)"}
+                      </Button>
+                    </div>
+                  </div>
+                </DialogContent>
+              </Dialog>
+              {/* Clear Database Button */}
+              <div className="mb-8 flex justify-end">
+                <Button
+                  onClick={clearDatabase}
+                  variant="outline"
+                >
+                  Layoff Staff
+                </Button>
+              </div>
+            </div>
+          </div>
         </div>
 
         {/* Messages */}
@@ -457,128 +522,122 @@ export default function CEODashboard() {
           </div>
         )}
 
-        {/* Task Input Section */}
-        <div className="rounded-lg border shadow p-6 mb-8">
-          <h2 className="text-2xl font-semibold mb-4">Create New Task</h2>
-          <div className="space-y-4">
-            <div>
-              <label className="block text-sm font-medium mb-2">Task Title</label>
-              <input
-                type="text"
-                value={taskTitle}
-                onChange={(e) => setTaskTitle(e.target.value)}
-                placeholder="e.g., Build a Next.js blog platform"
-                className="w-full px-4 py-2 rounded-lg border focus:outline-none focus:ring-2"
-                disabled={loading || !hrId}
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium mb-2">Task Description</label>
-              <textarea
-                value={taskDescription}
-                onChange={(e) => setTaskDescription(e.target.value)}
-                placeholder="Describe the task in detail..."
-                rows={4}
-                className="w-full px-4 py-2 rounded-lg border focus:outline-none focus:ring-2"
-                disabled={loading || !hrId}
-              />
-            </div>
-            <div className="flex gap-4">
-              <button
-                onClick={createTask}
-                disabled={loading || !hrId || !taskTitle.trim() || !taskDescription.trim()}
-                className="px-6 py-3 rounded-lg border shadow font-medium disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {loading ? "Creating Task..." : "Create Task & Assign to AR (Agent Resources)"}
-              </button>
-              <button
-                onClick={clearDatabase}
-                className="px-6 py-3 rounded-lg border shadow font-medium"
-              >
-                Layoffs (Clear Database)
-              </button>
-            </div>
-          </div>
-        </div>
-
         {/* Stats Overview */}
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
-          <div className="rounded-lg border shadow p-6">
-            <div className="text-sm mb-1">Total Tasks</div>
-            <div className="text-3xl font-bold">{tasks.length}</div>
-            <div className="text-xs mt-1">{highLevelTasks.length} high-level, {subtasks.length} subtasks</div>
-          </div>
-          <div className="rounded-lg border shadow p-6">
-            <div className="text-sm mb-1">Employees</div>
-            <div className="text-3xl font-bold">{employees.length}</div>
-            <div className="text-xs mt-1">{ics.length} ICs, {managers.length} Managers</div>
-          </div>
-          <div className="rounded-lg border shadow p-6">
-            <div className="text-sm mb-1">Deliverables</div>
-            <div className="text-3xl font-bold">{allDeliverables.length}</div>
-            <div className="text-xs mt-1">Total completed work</div>
-          </div>
-          <div className="rounded-lg border shadow p-6">
-            <div className="text-sm mb-1">Total Cost</div>
-            <div className="text-3xl font-bold">${totalCost.toFixed(2)}</div>
-            <div className="text-xs mt-1">USD</div>
-          </div>
-        </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 bg-background overflow-hidden rounded-xl border border-border mb-8">
+        {[
+          {
+            title: "Total Tasks",
+            subtitle: "All tasks",
+            mainValue: tasks.length,
+            badge: (
+              <Badge className="bg-blue-100 text-blue-600 dark:bg-blue-950 dark:text-blue-400 px-2 py-1 rounded-full text-sm font-medium flex items-center gap-1 shadow-none">
+                <CheckSquare className="w-3 h-3 text-blue-500" />
+                {highLevelTasks.length} high-level
+              </Badge>
+            ),
+            secondary: (
+              <div className="text-sm text-muted-foreground">
+                <span className="font-medium">{subtasks.length}</span> subtasks
+              </div>
+            )
+          },
+          {
+            title: "Employees",
+            subtitle: "Active workforce",
+            mainValue: employees.length,
+            badge: (
+              <Badge className="bg-purple-100 text-purple-600 dark:bg-purple-950 dark:text-purple-400 px-2 py-1 rounded-full text-sm font-medium flex items-center gap-1 shadow-none">
+                <Users className="w-3 h-3 text-purple-500" />
+                {ics.length} ICs
+              </Badge>
+            ),
+            secondary: (
+              <div className="text-sm text-muted-foreground">
+                <span className="font-medium">{managers.length}</span> managers
+              </div>
+            )
+          },
+          {
+            title: "Deliverables",
+            subtitle: "Completed work",
+            mainValue: allDeliverables.length,
+            badge: (
+              <Badge className="bg-green-100 text-green-600 dark:bg-green-950 dark:text-green-400 px-2 py-1 rounded-full text-sm font-medium flex items-center gap-1 shadow-none">
+                <FileText className="w-3 h-3 text-green-500" />
+                Total
+              </Badge>
+            ),
+            secondary: (
+              <div className="text-sm text-muted-foreground">
+                All completed deliverables
+              </div>
+            )
+          },
+          {
+            title: "Total Cost",
+            subtitle: "All time",
+            mainValue: `$${totalCost.toFixed(2)}`,
+            badge: (
+              <Badge className="bg-orange-100 text-orange-600 dark:bg-orange-950 dark:text-orange-400 px-2 py-1 rounded-full text-sm font-medium flex items-center gap-1 shadow-none">
+                <DollarSign className="w-3 h-3 text-orange-500" />
+                USD
+              </Badge>
+            ),
+            secondary: (
+              <div className="text-sm text-muted-foreground">
+                <span className="font-medium">{costs.length}</span> cost records
+              </div>
+            )
+          }
+        ].map((stat) => (
+          <Card
+            key={stat.title}
+            className="border-0 shadow-none rounded-none border-y md:border-x md:border-y-0 border-border first:border-t-0 md:first:border-l-0 md:first:border-t last:border-0"
+          >
+            <CardContent className="flex flex-col h-full space-y-2 justify-between">
+              <div className="space-y-0.5">
+                <div className="text-lg font-semibold text-foreground">{stat.title}</div>
+                <div className="text-sm text-muted-foreground">{stat.subtitle}</div>
+              </div>
+              <div className="flex-1 flex flex-col gap-1.5 justify-between grow">
+                <div className="flex items-center gap-2">
+                  <span className="text-3xl font-bold tracking-tight">{stat.mainValue}</span>
+                  {stat.badge}
+                </div>
+                {stat.secondary}
+              </div>
+            </CardContent>
+          </Card>
+        ))}
+      </div>
+        {/* View Mode Tabs */}
+        <Tabs 
+          value={viewMode} 
+          onValueChange={(value) => {
+            const newViewMode = value as typeof viewMode;
+            setViewMode(newViewMode);
+            // Clear selections when switching tabs
+            if (newViewMode === "tasks") {
+              setSelectedEmployee(null);
+            } else if (newViewMode === "employees") {
+              setSelectedTask(null);
+            } else {
+              setSelectedTask(null);
+              setSelectedEmployee(null);
+            }
+          }}
+          className="mb-6"
+        >
+          <TabsList>
+            <TabsTrigger value="tasks">Tasks</TabsTrigger>
+            <TabsTrigger value="employees">Employees</TabsTrigger>
+            <TabsTrigger value="costs">Costs</TabsTrigger>
+            <TabsTrigger value="deliverables">Deliverables</TabsTrigger>
+            <TabsTrigger value="meetings">Meetings</TabsTrigger>
+          </TabsList>
 
-        {/* View Mode Toggle */}
-        <div className="mb-6 flex gap-4">
-          <button
-            onClick={() => {
-              setViewMode("tasks");
-              setSelectedEmployee(null);
-            }}
-            className={`px-4 py-2 rounded-lg border shadow font-medium ${viewMode === "tasks" ? "ring-2" : ""}`}
-          >
-            Tasks
-          </button>
-          <button
-            onClick={() => {
-              setViewMode("employees");
-              setSelectedTask(null);
-            }}
-            className={`px-4 py-2 rounded-lg border shadow font-medium ${viewMode === "employees" ? "ring-2" : ""}`}
-          >
-            Employees
-          </button>
-          <button
-            onClick={() => {
-              setViewMode("costs");
-              setSelectedTask(null);
-              setSelectedEmployee(null);
-            }}
-            className={`px-4 py-2 rounded-lg border shadow font-medium ${viewMode === "costs" ? "ring-2" : ""}`}
-          >
-            Costs
-          </button>
-          <button
-            onClick={() => {
-              setViewMode("deliverables");
-              setSelectedTask(null);
-              setSelectedEmployee(null);
-            }}
-            className={`px-4 py-2 rounded-lg border shadow font-medium ${viewMode === "deliverables" ? "ring-2" : ""}`}
-          >
-            Deliverables
-          </button>
-          <button
-            onClick={() => {
-              setViewMode("meetings");
-              setSelectedTask(null);
-              setSelectedEmployee(null);
-            }}
-            className={`px-4 py-2 rounded-lg border shadow font-medium ${viewMode === "meetings" ? "ring-2" : ""}`}
-          >
-            Meetings
-          </button>
-        </div>
-
-        {/* Main Content Grid */}
-        {viewMode === "deliverables" ? (
+          {/* Main Content Grid */}
+          <TabsContent value="deliverables" className="mt-6">
           <div className="rounded-lg border shadow overflow-hidden">
             {allDeliverables.length === 0 ? (
               <div className="p-8">
@@ -763,7 +822,9 @@ export default function CEODashboard() {
               </div>
             )}
           </div>
-        ) : viewMode === "meetings" ? (
+          </TabsContent>
+
+          <TabsContent value="meetings" className="mt-6">
           <div className="rounded-lg border shadow overflow-hidden">
             {allMeetings.length === 0 ? (
               <div className="p-8">
@@ -991,7 +1052,9 @@ export default function CEODashboard() {
               </div>
             )}
           </div>
-        ) : viewMode === "costs" ? (
+          </TabsContent>
+
+          <TabsContent value="costs" className="mt-6">
           <div className="rounded-lg border shadow p-6">
             <h2 className="text-2xl font-semibold mb-6">Cost Breakdown</h2>
             
@@ -1127,323 +1190,516 @@ export default function CEODashboard() {
               </div>
             )}
           </div>
-        ) : viewMode === "tasks" ? (
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-            {/* Tasks List */}
-            <div className="lg:col-span-2 rounded-lg border shadow p-6">
-              <div className="flex justify-between items-center mb-4">
-                <h2 className="text-2xl font-semibold">Tasks</h2>
-                <label className="flex items-center gap-2 text-sm">
-                  <input
-                    type="checkbox"
-                    checked={autoRefresh}
-                    onChange={(e) => setAutoRefresh(e.target.checked)}
-                    className="rounded"
-                  />
-                  Auto-refresh
-                </label>
-              </div>
-              <div className="space-y-3 max-h-[600px] overflow-y-auto">
-                {tasks.length === 0 ? (
-                  <p className="text-center py-8">No tasks yet. Create your first task above!</p>
-                ) : (
-                  tasks.map((task) => (
-                    <div
-                      key={task.id}
-                      onClick={() => setSelectedTask(task)}
-                      className={`p-4 rounded-lg border-2 cursor-pointer transition-all ${
-                        selectedTask?.id === task.id ? "ring-2" : ""
-                      }`}
-                    >
-                      <div className="flex justify-between items-start mb-2">
-                        <h3 className="font-semibold">{task.title}</h3>
-                        <div className="flex gap-2">
-                          <span className="px-2 py-1 rounded text-xs font-medium border">
-                            {task.status}
-                          </span>
-                          <span className="px-2 py-1 rounded text-xs font-medium border">
-                            {task.priority}
-                          </span>
-                        </div>
-                      </div>
-                      <p className="text-sm mb-2 line-clamp-2">{task.description}</p>
-                      <div className="flex justify-between items-center text-xs">
-                        <span>{task.parentTaskId ? "Subtask" : "High-level Task"}</span>
-                        <span>{new Date(task.createdAt).toLocaleString()}</span>
-                      </div>
-                    </div>
-                  ))
-                )}
-              </div>
-            </div>
+          </TabsContent>
 
-            {/* Task Details */}
-            <div className="space-y-6">
-              {selectedTask ? (
-                <>
-                  {/* Task Info */}
-                  <div className="rounded-lg border shadow p-6">
-                    <h3 className="text-xl font-semibold mb-4">Task Details</h3>
-                    <div className="space-y-3">
+          <TabsContent value="tasks" className="mt-6">
+          <div className="rounded-lg border shadow overflow-hidden">
+            {tasks.length === 0 ? (
+              <div className="p-8">
+                <p className="text-center py-8">No tasks yet. Create your first task above!</p>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 lg:grid-cols-2 h-[calc(100vh-300px)]">
+                {/* Left Panel - Tasks List */}
+                <div className="border-r overflow-hidden flex flex-col">
+                  <div className="p-4 border-b bg-gray-50">
+                    <div className="flex justify-between items-center">
                       <div>
-                        <div className="text-sm">Status</div>
-                        <span className="px-2 py-1 rounded text-xs font-medium border">
-                          {selectedTask.status}
-                        </span>
+                        <h2 className="text-xl font-semibold">All Tasks</h2>
+                        <p className="text-sm text-gray-600 mt-1">{tasks.length} total</p>
                       </div>
-                      <div>
-                        <div className="text-sm mb-1">Description</div>
-                        <p className="text-sm">{selectedTask.description}</p>
-                      </div>
+                      <label className="flex items-center gap-2 text-sm">
+                        <input
+                          type="checkbox"
+                          checked={autoRefresh}
+                          onChange={(e) => setAutoRefresh(e.target.checked)}
+                          className="rounded"
+                        />
+                        Auto-refresh
+                      </label>
                     </div>
                   </div>
-
-                  {/* Stage Times */}
-                  {Object.keys(taskStageTimes).length > 0 && (
-                    <div className="rounded-lg border shadow p-6">
-                      <h3 className="text-xl font-semibold mb-4">Time in Stages</h3>
-                      <div className="space-y-2">
-                        {Object.entries(taskStageTimes).map(([stage, seconds]) => (
-                          <div key={stage} className="flex justify-between items-center">
-                            <span className="text-sm capitalize">{stage}</span>
-                            <span className="text-sm font-medium">{formatDuration(seconds)}</span>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Activity Log */}
-                  {taskActivity.length > 0 && (
-                    <div className="rounded-lg border shadow p-6">
-                      <h3 className="text-xl font-semibold mb-4">Activity Log</h3>
-                      <div className="space-y-3 max-h-[400px] overflow-y-auto">
-                        {taskActivity.map((activity, idx) => (
-                          <div key={idx} className="border-l-2 pl-3 pb-3">
-                            <div className="flex justify-between items-start">
-                              <div>
-                                <div className="text-sm font-medium">{activity.description}</div>
-                                {activity.employee && (
-                                  <div className="text-xs mt-1">by {activity.employee}</div>
+                  <div className="flex-1 overflow-y-auto">
+                    {tasks
+                      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+                      .map((task) => {
+                        const isSelected = selectedTask?.id === task.id;
+                        const assignee = task.assignedTo ? employees.find((e) => e.id === task.assignedTo) : null;
+                        
+                        return (
+                          <div
+                            key={task.id}
+                            onClick={() => setSelectedTask(task)}
+                            className={`p-4 border-b cursor-pointer transition-colors ${
+                              isSelected 
+                                ? "bg-blue-50 border-blue-200" 
+                                : "hover:bg-gray-50"
+                            }`}
+                          >
+                            <div className="flex items-start justify-between gap-2 mb-2">
+                              <div className="flex gap-2 items-center flex-wrap">
+                                <span className={`px-2 py-1 rounded text-xs font-medium border capitalize ${
+                                  task.status === "completed" ? "bg-green-100 text-green-800" :
+                                  task.status === "in-progress" ? "bg-blue-100 text-blue-800" :
+                                  task.status === "reviewed" ? "bg-purple-100 text-purple-800" :
+                                  "bg-gray-100 text-gray-800"
+                                }`}>
+                                  {task.status}
+                                </span>
+                                <span className={`px-2 py-1 rounded text-xs font-medium border ${
+                                  task.priority === "critical" ? "bg-red-100 text-red-800" :
+                                  task.priority === "high" ? "bg-orange-100 text-orange-800" :
+                                  task.priority === "medium" ? "bg-yellow-100 text-yellow-800" :
+                                  "bg-gray-100 text-gray-800"
+                                }`}>
+                                  {task.priority}
+                                </span>
+                                {task.parentTaskId && (
+                                  <span className="px-2 py-1 rounded text-xs font-medium border bg-white">
+                                    Subtask
+                                  </span>
                                 )}
                               </div>
-                              <div className="text-xs">{new Date(activity.timestamp).toLocaleString()}</div>
+                              <span className="text-xs text-gray-500 whitespace-nowrap">
+                                {new Date(task.createdAt).toLocaleDateString()}
+                              </span>
+                            </div>
+                            <div className="text-sm font-medium text-gray-900 mb-1 line-clamp-1">
+                              {task.title}
+                            </div>
+                            {assignee && (
+                              <Badge className="text-xs text-gray-600" variant="outline">
+                                Assigned to {assignee.name}
+                              </Badge>
+                            )}
+                            <div className="text-xs text-gray-500 mt-2 line-clamp-2">
+                              {task.description}
                             </div>
                           </div>
-                        ))}
+                        );
+                      })}
+                  </div>
+                </div>
+
+                {/* Right Panel - Task Details */}
+                <div className="overflow-hidden flex flex-col bg-white">
+                  {selectedTask ? (
+                    <>
+                      <div className="p-6 border-b bg-gray-50">
+                        <div className="flex items-start justify-between gap-4 mb-4">
+                          <div className="flex-1">
+                            <div className="flex gap-2 items-center mb-2">
+                              <span className={`px-3 py-1 rounded text-sm font-medium border capitalize ${
+                                selectedTask.status === "completed" ? "bg-green-100 text-green-800" :
+                                selectedTask.status === "in-progress" ? "bg-blue-100 text-blue-800" :
+                                selectedTask.status === "reviewed" ? "bg-purple-100 text-purple-800" :
+                                "bg-gray-100 text-gray-800"
+                              }`}>
+                                {selectedTask.status}
+                              </span>
+                              <span className={`px-3 py-1 rounded text-sm font-medium border ${
+                                selectedTask.priority === "critical" ? "bg-red-100 text-red-800" :
+                                selectedTask.priority === "high" ? "bg-orange-100 text-orange-800" :
+                                selectedTask.priority === "medium" ? "bg-yellow-100 text-yellow-800" :
+                                "bg-gray-100 text-gray-800"
+                              }`}>
+                                {selectedTask.priority}
+                              </span>
+                            </div>
+                            <h3 className="text-lg font-semibold text-gray-900 mb-2">
+                              {selectedTask.title}
+                            </h3>
+                          </div>
+                          <span className="text-sm text-gray-500 whitespace-nowrap">
+                            {new Date(selectedTask.createdAt).toLocaleString()}
+                          </span>
+                        </div>
+                        
+                        <div className="grid grid-cols-2 gap-4 text-sm">
+                          {selectedTask.assignedTo && (() => {
+                            const assignee = employees.find((e) => e.id === selectedTask.assignedTo);
+                            return assignee ? (
+                              <div>
+                                <span className="text-gray-600">Assigned to: </span>
+                                <span 
+                                  className="text-blue-600 cursor-pointer hover:underline font-medium"
+                                  onClick={() => {
+                                    setSelectedEmployee(assignee);
+                                    setViewMode("employees");
+                                  }}
+                                >
+                                  {assignee.name}
+                                </span>
+                              </div>
+                            ) : null;
+                          })()}
+                          <div>
+                            <span className="text-gray-600">Type: </span>
+                            <span className="font-medium">
+                              {selectedTask.parentTaskId ? "Subtask" : "High-level Task"}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+                      
+                      <div className="flex-1 overflow-y-auto p-6">
+                        <div className="space-y-6">
+                          {/* Description */}
+                          <div>
+                            <h4 className="text-sm font-semibold text-gray-700 mb-2">Description</h4>
+                            <div className="rounded-lg border bg-gray-50 p-4">
+                              <p className="text-sm whitespace-pre-wrap text-gray-900">
+                                {selectedTask.description}
+                              </p>
+                            </div>
+                          </div>
+
+                          {/* Stage Times */}
+                          {Object.keys(taskStageTimes).length > 0 && (
+                            <div>
+                              <h4 className="text-sm font-semibold text-gray-700 mb-2">Time in Stages</h4>
+                              <div className="rounded-lg border bg-gray-50 p-4">
+                                <div className="space-y-2">
+                                  {Object.entries(taskStageTimes).map(([stage, seconds]) => (
+                                    <div key={stage} className="flex justify-between items-center text-sm">
+                                      <span className="capitalize text-gray-700">{stage}</span>
+                                      <span className="font-medium text-gray-900">{formatDuration(seconds)}</span>
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Activity Log */}
+                          {taskActivity.length > 0 && (
+                            <div>
+                              <h4 className="text-sm font-semibold text-gray-700 mb-2">Activity Log</h4>
+                              <div className="rounded-lg border bg-gray-50 p-4">
+                                <div className="space-y-3 max-h-[300px] overflow-y-auto">
+                                  {taskActivity.map((activity, idx) => (
+                                    <div key={idx} className="border-l-2 border-gray-300 pl-3 pb-3">
+                                      <div className="flex justify-between items-start">
+                                        <div>
+                                          <div className="text-sm font-medium text-gray-900">{activity.description}</div>
+                                          {activity.employee && (
+                                            <div className="text-xs mt-1 text-gray-600">by {activity.employee}</div>
+                                          )}
+                                        </div>
+                                        <div className="text-xs text-gray-500">{new Date(activity.timestamp).toLocaleString()}</div>
+                                      </div>
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Deliverables */}
+                          {taskDeliverables.length > 0 && (
+                            <div>
+                              <h4 className="text-sm font-semibold text-gray-700 mb-2">Deliverables ({taskDeliverables.length})</h4>
+                              <div className="space-y-3 max-h-[300px] overflow-y-auto">
+                                {taskDeliverables.map((deliverable) => (
+                                  <div key={deliverable.id} className="rounded-lg border bg-white p-4">
+                                    <div className="flex justify-between items-start mb-2">
+                                      <span className="px-2 py-1 rounded text-xs font-medium border capitalize">
+                                        {deliverable.type}
+                                      </span>
+                                      {deliverable.evaluationScore !== null && (
+                                        <span className="px-2 py-1 rounded text-xs font-medium border bg-green-100 text-green-800">
+                                          {deliverable.evaluationScore}/10
+                                        </span>
+                                      )}
+                                    </div>
+                                    <div className="text-sm mt-2 whitespace-pre-wrap text-gray-900 line-clamp-3">
+                                      {deliverable.content}
+                                    </div>
+                                    <div className="text-xs mt-2 text-gray-500">
+                                      Created: {new Date(deliverable.createdAt).toLocaleString()}
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </>
+                  ) : (
+                    <div className="flex-1 flex items-center justify-center text-gray-500">
+                      <div className="text-center">
+                        <p className="text-lg mb-2">Select a task</p>
+                        <p className="text-sm">Choose an item from the list to view its details</p>
                       </div>
                     </div>
                   )}
+                </div>
+              </div>
+            )}
+          </div>
+          </TabsContent>
 
-                  {/* Deliverables */}
-                  {taskDeliverables.length > 0 && (
-                    <div className="rounded-lg border shadow p-6">
-                      <h3 className="text-xl font-semibold mb-4">Deliverables ({taskDeliverables.length})</h3>
-                      <div className="space-y-4 max-h-[400px] overflow-y-auto">
-                        {taskDeliverables.map((deliverable) => (
-                          <div key={deliverable.id} className="p-4 rounded-lg border">
-                            <div className="flex justify-between items-start mb-2">
-                              <span className="px-2 py-1 rounded text-xs font-medium border">
-                                {deliverable.type}
+          <TabsContent value="employees" className="mt-6">
+          <div className="rounded-lg border shadow overflow-hidden">
+            {employees.length === 0 ? (
+              <div className="p-8">
+                <p className="text-center py-8">No employees yet</p>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 lg:grid-cols-2 h-[calc(100vh-300px)]">
+                {/* Left Panel - Employees List */}
+                <div className="border-r overflow-hidden flex flex-col">
+                  <div className="p-4 border-b bg-gray-50">
+                    <h2 className="text-xl font-semibold">All Employees</h2>
+                    <p className="text-sm text-gray-600 mt-1">{employees.length} total</p>
+                  </div>
+                  <div className="flex-1 overflow-y-auto">
+                    {employees
+                      .sort((a, b) => a.name.localeCompare(b.name))
+                      .map((employee) => {
+                        const isSelected = selectedEmployee?.id === employee.id;
+                        const manager = employee.managerId ? employees.find((e) => e.id === employee.managerId) : null;
+                        
+                        return (
+                          <div
+                            key={employee.id}
+                            onClick={() => setSelectedEmployee(employee)}
+                            className={`p-4 border-b cursor-pointer transition-colors ${
+                              isSelected 
+                                ? "bg-blue-50 border-blue-200" 
+                                : "hover:bg-gray-50"
+                            }`}
+                          >
+                            <div className="flex items-start justify-between gap-2 mb-2">
+                              <div className="flex gap-2 items-center flex-wrap">
+                                <span className={`px-2 py-1 rounded text-xs font-medium border capitalize ${
+                                  employee.role === "manager" 
+                                    ? "bg-purple-100 text-purple-800" 
+                                    : "bg-blue-100 text-blue-800"
+                                }`}>
+                                  {employee.role.toUpperCase()}
+                                </span>
+                                {employee.status === "terminated" && (
+                                  <span className="px-2 py-1 rounded text-xs font-medium border bg-red-100 text-red-800">
+                                    Terminated
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                            <div className="text-sm font-medium text-gray-900 mb-1">
+                              {employee.name}
+                            </div>
+                            {manager && (
+                              <div className="text-xs text-gray-600">
+                                Manager: {manager.name}
+                              </div>
+                            )}
+                            <div className="text-xs text-gray-500 mt-2 line-clamp-1">
+                              Skills: {employee.skills.join(", ")}
+                            </div>
+                          </div>
+                        );
+                      })}
+                  </div>
+                </div>
+
+                {/* Right Panel - Employee Details */}
+                <div className="overflow-hidden flex flex-col bg-white">
+                  {selectedEmployee && employeeDetails ? (
+                    <>
+                      <div className="p-6 border-b bg-gray-50">
+                        <div className="flex items-start justify-between gap-4 mb-4">
+                          <div className="flex-1">
+                            <div className="flex gap-2 items-center mb-2">
+                              <span className={`px-3 py-1 rounded text-sm font-medium border capitalize ${
+                                employeeDetails.employee.role === "manager" 
+                                  ? "bg-purple-100 text-purple-800" 
+                                  : "bg-blue-100 text-blue-800"
+                              }`}>
+                                {employeeDetails.employee.role.toUpperCase()}
                               </span>
-                              {deliverable.evaluationScore && (
-                                <span className="text-sm font-medium">
-                                  Score: {deliverable.evaluationScore}/10
+                              {employeeDetails.employee.status === "terminated" && (
+                                <span className="px-3 py-1 rounded text-sm font-medium border bg-red-100 text-red-800">
+                                  Terminated
                                 </span>
                               )}
                             </div>
-                            <div className="text-sm mt-2 whitespace-pre-wrap">{deliverable.content}</div>
-                            <div className="text-xs mt-2">
-                              Created: {new Date(deliverable.createdAt).toLocaleString()}
+                            <h3 className="text-lg font-semibold text-gray-900 mb-2">
+                              {employeeDetails.employee.name}
+                            </h3>
+                          </div>
+                        </div>
+                        
+                        <div className="grid grid-cols-2 gap-4 text-sm">
+                          {employeeDetails.relationships.manager && (
+                            <div>
+                              <span className="text-gray-600">Manager: </span>
+                              <span 
+                                className="text-blue-600 cursor-pointer hover:underline font-medium"
+                                onClick={() => {
+                                  const manager = employees.find((e) => e.id === employeeDetails.employee.managerId);
+                                  if (manager) {
+                                    setSelectedEmployee(manager);
+                                  }
+                                }}
+                              >
+                                {employeeDetails.relationships.manager.name}
+                              </span>
                             </div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </>
-              ) : (
-                <div className="rounded-lg border shadow p-6">
-                  <p className="text-center py-8">Select a task to view details</p>
-                </div>
-              )}
-            </div>
-          </div>
-        ) : (
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-            {/* Employees List */}
-            <div className="lg:col-span-2 rounded-lg border shadow p-6">
-              <h2 className="text-2xl font-semibold mb-4">Employees</h2>
-              <div className="space-y-3 max-h-[600px] overflow-y-auto">
-                {employees.length === 0 ? (
-                  <p className="text-center py-8">No employees yet</p>
-                ) : (
-                  employees.map((employee) => (
-                    <div
-                      key={employee.id}
-                      onClick={() => setSelectedEmployee(employee)}
-                      className={`p-4 rounded-lg border-2 cursor-pointer transition-all ${
-                        selectedEmployee?.id === employee.id ? "ring-2" : ""
-                      }`}
-                    >
-                      <div className="flex justify-between items-start mb-2">
-                        <h3 className="font-semibold">{employee.name}</h3>
-                        <span className="px-2 py-1 rounded text-xs font-medium border">
-                          {employee.role.toUpperCase()}
-                        </span>
-                      </div>
-                      <div className="text-sm">Skills: {employee.skills.join(", ")}</div>
-                    </div>
-                  ))
-                )}
-              </div>
-            </div>
-
-            {/* Employee Details */}
-            <div className="space-y-6">
-              {selectedEmployee && employeeDetails ? (
-                <>
-                  {/* Employee Info */}
-                  <div className="rounded-lg border shadow p-6">
-                    <h3 className="text-xl font-semibold mb-4">{employeeDetails.employee.name}</h3>
-                    <div className="space-y-3">
-                      <div>
-                        <div className="text-sm">Role</div>
-                        <span className="px-2 py-1 rounded text-xs font-medium border">
-                          {employeeDetails.employee.role.toUpperCase()}
-                        </span>
-                      </div>
-                      <div>
-                        <div className="text-sm mb-1">Skills</div>
-                        <div className="flex flex-wrap gap-1">
-                          {employeeDetails.employee.skills.map((skill, idx) => (
-                            <span key={idx} className="px-2 py-1 rounded text-xs border">
-                              {skill}
-                            </span>
-                          ))}
+                          )}
+                          {employeeDetails.relationships.directReports.length > 0 && (
+                            <div>
+                              <span className="text-gray-600">Direct Reports: </span>
+                              <span className="font-medium">
+                                {employeeDetails.relationships.directReports.length}
+                              </span>
+                            </div>
+                          )}
                         </div>
                       </div>
-                    </div>
-                  </div>
-
-                  {/* Relationships */}
-                  <div className="rounded-lg border shadow p-6">
-                    <h3 className="text-xl font-semibold mb-4">Relationships</h3>
-                    <div className="space-y-3">
-                      {employeeDetails.relationships.manager && (
-                        <div>
-                          <div className="text-sm">Manager</div>
-                          <div className="text-sm font-medium">
-                            {employeeDetails.relationships.manager.name}
-                          </div>
-                        </div>
-                      )}
-                      {employeeDetails.relationships.directReports.length > 0 && (
-                        <div>
-                          <div className="text-sm mb-2">
-                            Direct Reports ({employeeDetails.relationships.directReports.length})
-                          </div>
-                          <div className="space-y-1">
-                            {employeeDetails.relationships.directReports.map((dr) => (
-                              <div key={dr.id} className="text-sm">
-                                {dr.name}
+                      
+                      <div className="flex-1 overflow-y-auto p-6">
+                        <div className="space-y-6">
+                          {/* Skills */}
+                          <div>
+                            <h4 className="text-sm font-semibold text-gray-700 mb-2">Skills</h4>
+                            <div className="rounded-lg border bg-gray-50 p-4">
+                              <div className="flex flex-wrap gap-2">
+                                {employeeDetails.employee.skills.map((skill, idx) => (
+                                  <span key={idx} className="px-2 py-1 rounded text-xs border bg-white">
+                                    {skill}
+                                  </span>
+                                ))}
                               </div>
-                            ))}
+                            </div>
                           </div>
+
+                          {/* Stats */}
+                          <div>
+                            <h4 className="text-sm font-semibold text-gray-700 mb-2">Stats</h4>
+                            <div className="rounded-lg border bg-gray-50 p-4">
+                              <div className="grid grid-cols-2 gap-4">
+                                <div>
+                                  <div className="text-xs text-gray-600">Current Tasks</div>
+                                  <div className="text-2xl font-bold text-gray-900">{employeeDetails.stats.currentTasks}</div>
+                                </div>
+                                <div>
+                                  <div className="text-xs text-gray-600">Completed</div>
+                                  <div className="text-2xl font-bold text-gray-900">{employeeDetails.stats.completedTasks}</div>
+                                </div>
+                                <div>
+                                  <div className="text-xs text-gray-600">Memories</div>
+                                  <div className="text-2xl font-bold text-gray-900">{employeeDetails.stats.totalMemories}</div>
+                                </div>
+                                <div>
+                                  <div className="text-xs text-gray-600">Pings</div>
+                                  <div className="text-2xl font-bold text-gray-900">{employeeDetails.stats.totalPings}</div>
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Direct Reports */}
+                          {employeeDetails.relationships.directReports.length > 0 && (
+                            <div>
+                              <h4 className="text-sm font-semibold text-gray-700 mb-2">
+                                Direct Reports ({employeeDetails.relationships.directReports.length})
+                              </h4>
+                              <div className="rounded-lg border bg-gray-50 p-4">
+                                <div className="space-y-2">
+                                  {employeeDetails.relationships.directReports.map((dr) => (
+                                    <div 
+                                      key={dr.id} 
+                                      className="text-sm text-blue-600 cursor-pointer hover:underline font-medium"
+                                      onClick={() => {
+                                        const report = employees.find((e) => e.id === dr.id);
+                                        if (report) {
+                                          setSelectedEmployee(report);
+                                        }
+                                      }}
+                                    >
+                                      {dr.name}
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Memories */}
+                          {employeeDetails.memories.length > 0 && (
+                            <div>
+                              <h4 className="text-sm font-semibold text-gray-700 mb-2">Memories ({employeeDetails.memories.length})</h4>
+                              <div className="space-y-3 max-h-[300px] overflow-y-auto">
+                                {employeeDetails.memories.slice(0, 10).map((memory) => (
+                                  <div key={memory.id} className="rounded-lg border bg-white p-4">
+                                    <div className="flex justify-between items-start mb-2">
+                                      <span className="px-2 py-1 rounded text-xs font-medium border capitalize">
+                                        {memory.type}
+                                      </span>
+                                      <span className="text-xs text-gray-500">{new Date(memory.createdAt).toLocaleString()}</span>
+                                    </div>
+                                    <div className="text-sm mt-2 text-gray-900 line-clamp-3">
+                                      {memory.content}
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Pings */}
+                          {employeeDetails.pings.length > 0 && (
+                            <div>
+                              <h4 className="text-sm font-semibold text-gray-700 mb-2">Pings ({employeeDetails.pings.length})</h4>
+                              <div className="space-y-3 max-h-[300px] overflow-y-auto">
+                                {employeeDetails.pings.slice(0, 5).map((ping, idx) => (
+                                  <div key={idx} className="rounded-lg border bg-white p-4">
+                                    <div className="text-sm text-gray-900 line-clamp-3">{ping.content}</div>
+                                    <div className="text-xs mt-2 text-gray-500">{new Date(ping.timestamp).toLocaleString()}</div>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Meetings */}
+                          {employeeDetails.meetings.recent.length > 0 && (
+                            <div>
+                              <h4 className="text-sm font-semibold text-gray-700 mb-2">Recent Meetings</h4>
+                              <div className="space-y-3 max-h-[300px] overflow-y-auto">
+                                {employeeDetails.meetings.recent.slice(0, 5).map((meeting) => (
+                                  <div key={meeting.id} className="rounded-lg border bg-white p-4">
+                                    <div className="flex justify-between items-start mb-2">
+                                      <span className="px-2 py-1 rounded text-xs font-medium border capitalize">
+                                        {meeting.type}
+                                      </span>
+                                      <span className="text-xs text-gray-500">{new Date(meeting.createdAt).toLocaleString()}</span>
+                                    </div>
+                                    <div className="text-xs text-gray-600">{meeting.participants.length} participants</div>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
                         </div>
-                      )}
-                    </div>
-                  </div>
-
-                  {/* Stats */}
-                  <div className="rounded-lg border shadow p-6">
-                    <h3 className="text-xl font-semibold mb-4">Stats</h3>
-                    <div className="grid grid-cols-2 gap-3">
-                      <div>
-                        <div className="text-xs">Current Tasks</div>
-                        <div className="text-2xl font-bold">{employeeDetails.stats.currentTasks}</div>
                       </div>
-                      <div>
-                        <div className="text-xs">Completed</div>
-                        <div className="text-2xl font-bold">{employeeDetails.stats.completedTasks}</div>
-                      </div>
-                      <div>
-                        <div className="text-xs">Memories</div>
-                        <div className="text-2xl font-bold">{employeeDetails.stats.totalMemories}</div>
-                      </div>
-                      <div>
-                        <div className="text-xs">Pings</div>
-                        <div className="text-2xl font-bold">{employeeDetails.stats.totalPings}</div>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Memories */}
-                  {employeeDetails.memories.length > 0 && (
-                    <div className="rounded-lg border shadow p-6">
-                      <h3 className="text-xl font-semibold mb-4">Memories ({employeeDetails.memories.length})</h3>
-                      <div className="space-y-3 max-h-[400px] overflow-y-auto">
-                        {employeeDetails.memories.slice(0, 10).map((memory) => (
-                          <div key={memory.id} className="p-3 rounded-lg border">
-                            <div className="flex justify-between items-start mb-1">
-                              <span className="px-2 py-1 rounded text-xs font-medium border">
-                                {memory.type}
-                              </span>
-                              <span className="text-xs">{new Date(memory.createdAt).toLocaleString()}</span>
-                            </div>
-                            <div className="text-sm mt-2">
-                              {memory.content.substring(0, 200)}
-                              {memory.content.length > 200 && "..."}
-                            </div>
-                          </div>
-                        ))}
+                    </>
+                  ) : (
+                    <div className="flex-1 flex items-center justify-center text-gray-500">
+                      <div className="text-center">
+                        <p className="text-lg mb-2">Select an employee</p>
+                        <p className="text-sm">Choose an item from the list to view details</p>
                       </div>
                     </div>
                   )}
-
-                  {/* Pings */}
-                  {employeeDetails.pings.length > 0 && (
-                    <div className="rounded-lg border shadow p-6">
-                      <h3 className="text-xl font-semibold mb-4">Pings ({employeeDetails.pings.length})</h3>
-                      <div className="space-y-2 max-h-[300px] overflow-y-auto">
-                        {employeeDetails.pings.slice(0, 5).map((ping, idx) => (
-                          <div key={idx} className="p-3 rounded-lg border">
-                            <div className="text-sm">{ping.content.substring(0, 150)}</div>
-                            <div className="text-xs mt-1">{new Date(ping.timestamp).toLocaleString()}</div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Meetings */}
-                  {employeeDetails.meetings.recent.length > 0 && (
-                    <div className="rounded-lg border shadow p-6">
-                      <h3 className="text-xl font-semibold mb-4">Recent Meetings</h3>
-                      <div className="space-y-2 max-h-[300px] overflow-y-auto">
-                        {employeeDetails.meetings.recent.slice(0, 5).map((meeting) => (
-                          <div key={meeting.id} className="p-3 rounded-lg border">
-                            <div className="flex justify-between items-start mb-1">
-                              <span className="px-2 py-1 rounded text-xs font-medium border">
-                                {meeting.type}
-                              </span>
-                              <span className="text-xs">{new Date(meeting.createdAt).toLocaleString()}</span>
-                            </div>
-                            <div className="text-xs mt-1">{meeting.participants.length} participants</div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </>
-              ) : (
-                <div className="rounded-lg border shadow p-6">
-                  <p className="text-center py-8">Select an employee to view details</p>
                 </div>
-              )}
-            </div>
+              </div>
+            )}
           </div>
-        )}
+          </TabsContent>
+        </Tabs>
       </div>
     </div>
   );

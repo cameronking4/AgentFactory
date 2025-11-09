@@ -1276,6 +1276,29 @@ async function getICState(employeeId: string): Promise<ICState | null> {
   "use step";
 
   try {
+    // Try to get from Redis cache first
+    try {
+      const cachedState = await redisGet(`ic:state:${employeeId}`);
+      if (cachedState) {
+        const parsed = JSON.parse(cachedState) as ICState;
+        // Validate the cached state is still valid by checking if employee exists
+        const [employee] = await db
+          .select()
+          .from(employees)
+          .where(eq(employees.id, employeeId))
+          .limit(1);
+        
+        if (employee && employee.role === "ic") {
+          // Update lastActive and return cached state
+          parsed.lastActive = new Date().toISOString();
+          return parsed;
+        }
+      }
+    } catch (redisError) {
+      // If Redis fails, fall back to database
+      console.warn(`[IC ${employeeId}] Redis cache miss or error, falling back to database:`, redisError);
+    }
+
     const [employee] = await db
       .select()
       .from(employees)
@@ -1326,7 +1349,7 @@ async function getICState(employeeId: string): Promise<ICState | null> {
       }
     }
 
-    return {
+    const state: ICState = {
       employeeId,
       name: employee.name,
       role: "ic",
@@ -1340,6 +1363,16 @@ async function getICState(employeeId: string): Promise<ICState | null> {
       createdAt: employee.createdAt.toISOString(),
       lastActive: new Date().toISOString(),
     };
+
+    // Cache in Redis (expires in 1 hour)
+    try {
+      await redisSet(`ic:state:${employeeId}`, JSON.stringify(state), { ex: 3600 });
+    } catch (redisError) {
+      // Non-fatal - continue even if Redis caching fails
+      console.warn(`[IC ${employeeId}] Failed to cache state in Redis:`, redisError);
+    }
+
+    return state;
   } catch (error) {
     console.error(`Error getting IC state:`, error);
     return null;
@@ -1350,6 +1383,20 @@ async function setICState(employeeId: string, state: ICState): Promise<void> {
   "use step";
 
   try {
+    // Update lastActive timestamp
+    const updatedState: ICState = {
+      ...state,
+      lastActive: new Date().toISOString(),
+    };
+
+    // Store in Redis cache (expires in 1 hour)
+    try {
+      await redisSet(`ic:state:${employeeId}`, JSON.stringify(updatedState), { ex: 3600 });
+    } catch (redisError) {
+      // Non-fatal - continue even if Redis caching fails
+      console.warn(`[IC ${employeeId}] Failed to cache state in Redis:`, redisError);
+    }
+
     // Update employee's updatedAt timestamp to indicate workflow is active
     // This is used by HR workflow's self-healing mechanism to detect if workflow is running
     await db
@@ -1359,11 +1406,12 @@ async function setICState(employeeId: string, state: ICState): Promise<void> {
       })
       .where(eq(employees.id, employeeId));
 
-    // State is primarily stored in database (employees, tasks, memories tables)
-    // In production, would use Redis or dedicated state table for collaborationHistory and reflectionInsights
-    // The lastActive field in state is used for workflow health monitoring
+    // State is also stored in database (employees, tasks, memories tables)
+    // The database is the source of truth, Redis is just for fast access
+    // collaborationHistory and reflectionInsights would be stored in DB in production
   } catch (error) {
-    console.error(`Error setting IC state:`, error);
+    console.error(`[IC ${employeeId}] Error setting IC state:`, error);
+    // Don't throw - state management should be resilient
   }
 }
 

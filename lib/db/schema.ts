@@ -5,9 +5,9 @@ import {
   timestamp,
   integer,
   numeric,
-  boolean,
+  // boolean,
   pgEnum,
-  varchar,
+  // varchar,
   index,
   foreignKey,
 } from "drizzle-orm/pg-core";
@@ -18,7 +18,7 @@ export const employeeStatusEnum = pgEnum("employee_status", [
   "terminated",
 ]);
 
-export const employeeRoleEnum = pgEnum("employee_role", ["ic", "manager"]);
+export const employeeRoleEnum = pgEnum("employee_role", ["ic", "manager", "ceo"]);
 
 export const taskStatusEnum = pgEnum("task_status", [
   "pending",
@@ -55,6 +55,13 @@ export const meetingTypeEnum = pgEnum("meeting_type", [
 ]);
 
 export const costTypeEnum = pgEnum("cost_type", ["api", "mcp", "storage", "tokens"]);
+
+export const reportStatusEnum = pgEnum("report_status", [
+  "draft",
+  "submitted",
+  "acknowledged",
+  "responded",
+]);
 
 // Tables
 export const employees = pgTable(
@@ -195,6 +202,58 @@ export const costs = pgTable(
     employeeIdIdx: index("costs_employee_id_idx").on(table.employeeId),
     taskIdIdx: index("costs_task_id_idx").on(table.taskId),
     typeIdx: index("costs_type_idx").on(table.type),
+  })
+);
+
+export const reports = pgTable(
+  "reports",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    managerId: uuid("manager_id")
+      .notNull()
+      .references(() => employees.id),
+    ceoId: uuid("ceo_id").references(() => employees.id), // CEO who receives the report
+    title: text("title").notNull(),
+    content: text("content").notNull(), // Report content (JSON or markdown)
+    status: reportStatusEnum("status").notNull().default("draft"),
+    periodStart: timestamp("period_start").notNull(), // Start of reporting period
+    periodEnd: timestamp("period_end").notNull(), // End of reporting period
+    submittedAt: timestamp("submitted_at"),
+    acknowledgedAt: timestamp("acknowledged_at"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (table) => ({
+    managerIdIdx: index("reports_manager_id_idx").on(table.managerId),
+    ceoIdIdx: index("reports_ceo_id_idx").on(table.ceoId),
+    statusIdx: index("reports_status_idx").on(table.status),
+    managerFk: foreignKey({
+      columns: [table.managerId],
+      foreignColumns: [employees.id],
+    }),
+  })
+);
+
+export const reportResponses = pgTable(
+  "report_responses",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    reportId: uuid("report_id")
+      .notNull()
+      .references(() => reports.id),
+    ceoId: uuid("ceo_id")
+      .notNull()
+      .references(() => employees.id),
+    response: text("response").notNull(), // CEO's response (questions, guidance, directives)
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (table) => ({
+    reportIdIdx: index("report_responses_report_id_idx").on(table.reportId),
+    ceoIdIdx: index("report_responses_ceo_id_idx").on(table.ceoId),
+    reportFk: foreignKey({
+      columns: [table.reportId],
+      foreignColumns: [table.id],
+    }),
   })
 );
 

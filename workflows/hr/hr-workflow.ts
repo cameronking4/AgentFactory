@@ -5,6 +5,7 @@ import { db } from "@/lib/db";
 import { employees, tasks, memories, costs } from "@/lib/db/schema";
 import { eq, and, sql, isNull, inArray, or } from "drizzle-orm";
 import { trackAICost } from "@/lib/ai/cost-tracking";
+import { get as redisGet, set as redisSet } from "@/lib/redis";
 import {
   managerEvaluationHook,
 } from "@/workflows/employees/manager-workflow";
@@ -1337,20 +1338,57 @@ async function handleHireEmployee(
 }
 
 // State management functions
-// For MVP, use in-memory store (like counter actor)
-// In production, would use Redis or dedicated HR state table
-const hrStateStore = new Map<string, HRState>();
-
 async function getHRState(hrId: string): Promise<HRState | null> {
   "use step";
 
-  const storedState = hrStateStore.get(hrId);
-  return storedState || null;
+  try {
+    // Try to get from Redis cache first
+    try {
+      const cachedState = await redisGet(`hr:state:${hrId}`);
+      if (cachedState) {
+        const parsed = JSON.parse(cachedState) as HRState;
+        // Update lastActive and return cached state
+        // HR is not an employee, so we don't validate against employees table
+        parsed.lastActive = new Date().toISOString();
+        return parsed;
+      }
+    } catch (redisError) {
+      // If Redis fails, return null (state will be recreated from initial state)
+      console.warn(`[HR ${hrId}] Redis cache miss or error:`, redisError);
+    }
+
+    // HR state is stored only in Redis (HR is not an employee, so no database record)
+    // Return null if not found in cache - the initial state should be set when HR workflow starts
+    return null;
+  } catch (error) {
+    console.error(`Error getting HR state:`, error);
+    return null;
+  }
 }
 
 async function setHRState(hrId: string, state: HRState): Promise<void> {
   "use step";
 
-  hrStateStore.set(hrId, state);
+  try {
+    // Update lastActive timestamp
+    const updatedState: HRState = {
+      ...state,
+      lastActive: new Date().toISOString(),
+    };
+
+    // Store in Redis cache (expires in 1 hour)
+    try {
+      await redisSet(`hr:state:${hrId}`, JSON.stringify(updatedState), { ex: 3600 });
+    } catch (redisError) {
+      // Non-fatal - continue even if Redis caching fails
+      console.warn(`[HR ${hrId}] Failed to cache state in Redis:`, redisError);
+    }
+
+    // State is also stored in database (employees, tasks, memories tables)
+    // The database is the source of truth, Redis is just for fast access
+  } catch (error) {
+    console.error(`[HR ${hrId}] Error setting HR state:`, error);
+    // Don't throw - state management should be resilient
+  }
 }
 

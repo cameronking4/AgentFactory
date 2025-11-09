@@ -4,6 +4,7 @@ import { db } from "@/lib/db";
 import { employees, meetings, tasks, memories } from "@/lib/db/schema";
 import { eq, and, inArray } from "drizzle-orm";
 import { icMeetingHook, icPingHook } from "@/workflows/shared/hooks";
+import { get as redisGet, set as redisSet } from "@/lib/redis";
 import "dotenv/config";
 
 // Meeting Orchestrator State
@@ -563,17 +564,51 @@ async function getOrchestratorState(
 ): Promise<MeetingOrchestratorState | null> {
   "use step";
 
-  // For MVP, store in memory/database
-  // In production, would use Redis or dedicated table
-  // For now, return basic state
-  return {
-    orchestratorId,
-    scheduledMeetings: [],
-    activePings: {}, // should be an object, not an array
-    createdAt: new Date().toISOString(),
-    lastActive: new Date().toISOString(),
-  };
-};
+  try {
+    // Try to get from Redis cache first
+    try {
+      const cachedState = await redisGet(`orchestrator:state:${orchestratorId}`);
+      if (cachedState) {
+        const parsed = JSON.parse(cachedState) as MeetingOrchestratorState;
+        // Update lastActive and return cached state
+        parsed.lastActive = new Date().toISOString();
+        return parsed;
+      }
+    } catch (redisError) {
+      // If Redis fails, fall back to default state
+      console.warn(`[Orchestrator ${orchestratorId}] Redis cache miss or error, using default state:`, redisError);
+    }
+
+    // Return default state if not in cache
+    const defaultState: MeetingOrchestratorState = {
+      orchestratorId,
+      scheduledMeetings: [],
+      activePings: {},
+      createdAt: new Date().toISOString(),
+      lastActive: new Date().toISOString(),
+    };
+
+    // Cache in Redis (expires in 1 hour)
+    try {
+      await redisSet(`orchestrator:state:${orchestratorId}`, JSON.stringify(defaultState), { ex: 3600 });
+    } catch (redisError) {
+      // Non-fatal - continue even if Redis caching fails
+      console.warn(`[Orchestrator ${orchestratorId}] Failed to cache state in Redis:`, redisError);
+    }
+
+    return defaultState;
+  } catch (error) {
+    console.error(`Error getting orchestrator state:`, error);
+    // Return default state on error
+    return {
+      orchestratorId,
+      scheduledMeetings: [],
+      activePings: {},
+      createdAt: new Date().toISOString(),
+      lastActive: new Date().toISOString(),
+    };
+  }
+}
 
 async function setOrchestratorState(
   orchestratorId: string,
@@ -581,16 +616,27 @@ async function setOrchestratorState(
 ): Promise<void> {
   "use step";
 
-  // For MVP, state is stored in workflow
-  // In production, would persist to database/Redis
-  // For MVP, this is a no-op. (Fix: do not attempt to insert properties not allowed by schema.)
-  // Example: you might only be able to store type, participants, createdAt
-  // await db.insert(meetings).values({
-  //   id: crypto.randomUUID().toString(),
-  //   type: "sync" as const,
-  //   participants: state.scheduledMeetings.flatMap((m) => m.participants),
-  //   transcript: "",
-  //   createdAt: new Date(),
-  // });
+  try {
+    // Update lastActive timestamp
+    const updatedState: MeetingOrchestratorState = {
+      ...state,
+      lastActive: new Date().toISOString(),
+    };
+
+    // Store in Redis cache (expires in 1 hour)
+    try {
+      await redisSet(`orchestrator:state:${orchestratorId}`, JSON.stringify(updatedState), { ex: 3600 });
+    } catch (redisError) {
+      // Non-fatal - continue even if Redis caching fails
+      console.warn(`[Orchestrator ${orchestratorId}] Failed to cache state in Redis:`, redisError);
+    }
+
+    // State is stored in Redis for fast access
+    // Scheduled meetings are also tracked in the database (meetings table)
+    // The database is the source of truth for meeting records
+  } catch (error) {
+    console.error(`[Orchestrator ${orchestratorId}] Error setting orchestrator state:`, error);
+    // Don't throw - state management should be resilient
+  }
 }
 
