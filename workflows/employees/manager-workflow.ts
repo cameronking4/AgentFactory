@@ -6,6 +6,8 @@ import { eq, and, desc, inArray, isNull, or, gte, lte } from "drizzle-orm";
 import { icTaskHook } from "@/workflows/employees/ic-workflow";
 import { trackAICost } from "@/lib/ai/cost-tracking";
 import { get as redisGet, set as redisSet } from "@/lib/redis";
+import { createManagerTools } from "@/workflows/tools/manager-tools";
+import { validateTools } from "@/workflows/tools/utils";
 import "dotenv/config";
 
 // Manager Workflow State
@@ -35,6 +37,46 @@ export type ManagerEvent =
 
 // Define hooks for type safety
 export const managerEvaluationHook = defineHook<ManagerEvent>();
+
+/**
+ * Gets the AI model for a manager
+ * Managers use "moonshotai/kimi-k2-thinking"
+ */
+function getModelForManager(_managerId: string): string {
+  // All managers use the same model
+  return "moonshotai/kimi-k2-thinking";
+}
+
+/**
+ * Gets the AI model for an IC based on their ID
+ * Uses a hash-based approach to consistently assign models:
+ * - IC 1s use "openai/gpt-4.1"
+ * - IC 2s use "openai/gpt-5"
+ * - IC 3s use "anthropic/claude-sonnet-4"
+ */
+export function getModelForIC(employeeId: string): string {
+  // Simple hash function to consistently assign models based on employee ID
+  let hash = 0;
+  for (let i = 0; i < employeeId.length; i++) {
+    const char = employeeId.charCodeAt(i);
+    hash = ((hash << 5) - hash) + char;
+    hash = hash & hash; // Convert to 32-bit integer
+  }
+  
+  // Use modulo to assign one of three models
+  const modelIndex = Math.abs(hash) % 3;
+  
+  switch (modelIndex) {
+    case 0:
+      return "openai/gpt-4.1";
+    case 1:
+      return "openai/gpt-5";
+    case 2:
+      return "anthropic/claude-sonnet-4";
+    default:
+      return "openai/gpt-4.1"; // Fallback
+  }
+}
 
 // Initial state factory
 export function createInitialManagerState(
@@ -267,7 +309,7 @@ async function handleEvaluateDeliverable(
     await db.insert(memories).values({
       employeeId: managerId,
       type: "learning", // Use "learning" type for evaluations
-      content: `Evaluated deliverable for task "${task.title}" by IC ${task.assignedTo || "unknown"}. Score: ${evaluation.score}/10. Feedback: ${evaluation.feedback.substring(0, 500)}`,
+      content: `Evaluated deliverable for task "${task.title}" by IC ${task.assignedTo || "unknown"}. Score: ${evaluation.score}/10. Feedback: ${evaluation.feedback?.substring(0, 500) || evaluation.feedback || "No feedback"}`,
       importance: evaluation.score >= 8 ? "0.7" : evaluation.score >= 6 ? "0.8" : "0.9", // Higher importance for low scores (learning opportunity)
     });
 
@@ -449,6 +491,9 @@ async function handleMarkReviewed(managerId: string, taskId: string) {
   }
 }
 
+// Manager tools are now in workflows/tools/manager-tools.ts
+// Removed createManagerTools function - now imported from @/workflows/tools/manager-tools
+
 /**
  * Uses AI to evaluate a deliverable quality
  */
@@ -469,6 +514,18 @@ async function evaluateDeliverable(
 
     const persona = manager?.persona || "";
 
+    // Create tools for manager
+    const tools = createManagerTools(managerId);
+    
+    // Validate tools object (ensure all tools have inputSchema)
+    if (!tools || typeof tools !== 'object') {
+      console.error(`[Manager ${managerId}] Invalid tools object created`);
+      throw new Error("Failed to create tools for deliverable evaluation");
+    }
+    
+    // Validate tools using shared utility
+    validateTools(tools, `Manager ${managerId}`);
+
     const prompt = `You are a QA manager evaluating a deliverable. Your job is to assess quality and provide a score from 1-10.
 
 ${persona ? `Your Persona: ${persona}\n\n` : ""}
@@ -479,6 +536,8 @@ Task Description: ${task.description}
 Deliverable Type: ${deliverable.type}
 Deliverable Content:
 ${deliverable.content.substring(0, 2000)}${deliverable.content.length > 2000 ? '...' : ''}
+
+You have access to tools to search for similar deliverables, find employees, fetch memories, and search tasks. Use these tools if you need context or want to compare with similar work.
 
 Evaluate this deliverable based on:
 1. Completeness - Does it fully address the task requirements?
@@ -492,16 +551,21 @@ Respond in JSON format:
   "feedback": "detailed feedback explaining the score"
 }`;
 
+    // Get model for manager
+    const model = getModelForManager(managerId);
+
     const result = await generateText({
-      model: 'openai/gpt-4.1' as never,
+      model: model as never,
       prompt,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      tools: tools as any, // Type assertion to bypass tool type issues
     });
 
     // Track cost
     await trackAICost(result, {
       employeeId: managerId,
       taskId: task.id,
-      model: "openai/gpt-4.1",
+      model: model,
       operation: "deliverable_evaluation",
     });
 
@@ -1075,8 +1139,10 @@ Respond in JSON:
   "summary": "overall summary of learnings"
 }`;
 
+    const model = getModelForManager(managerId);
+
     const result = await generateText({
-      model: "openai/gpt-4.1" as never,
+      model: model as never,
       prompt,
     });
 
@@ -1084,7 +1150,7 @@ Respond in JSON:
     await trackAICost(result, {
       employeeId: managerId,
       taskId: null,
-      model: "openai/gpt-4.1",
+      model: model,
       operation: "manager_memory_building",
     });
 
@@ -1386,8 +1452,10 @@ Generate a comprehensive status report that includes:
 
 Format the report in a clear, professional manner suitable for executive review.`;
 
+    const model = getModelForManager(managerId);
+
     const result = await generateText({
-      model: 'openai/gpt-4.1' as never,
+      model: model as never,
       prompt,
     });
 
@@ -1395,7 +1463,7 @@ Format the report in a clear, professional manner suitable for executive review.
     await trackAICost(result, {
       employeeId: managerId,
       taskId: null,
-      model: "openai/gpt-4.1",
+      model: model,
       operation: "report_generation",
     });
 
@@ -1618,8 +1686,10 @@ Return a JSON array:
 
 Only create tasks that are truly actionable and necessary.`;
 
+    const model = getModelForManager(managerId);
+
     const result = await generateText({
-      model: 'openai/gpt-4.1' as never,
+      model: model as never,
       prompt,
     });
 
@@ -1627,7 +1697,7 @@ Only create tasks that are truly actionable and necessary.`;
     await trackAICost(result, {
       employeeId: managerId,
       taskId: null,
-      model: "openai/gpt-4.1",
+      model: model,
       operation: "task_extraction_from_report",
     });
 

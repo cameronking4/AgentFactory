@@ -1,12 +1,15 @@
 import { defineHook, getWorkflowMetadata, fetch, sleep } from "workflow";
 import { generateText } from "ai";
+import { z } from "zod";
 import { db } from "@/lib/db";
 import { employees, tasks, deliverables, memories } from "@/lib/db/schema";
-import { eq, and, sql, or } from "drizzle-orm";
+import { eq, and, sql, or, like, ilike, desc, gte, inArray } from "drizzle-orm";
 import { icMeetingHook, icPingHook } from "@/workflows/shared/hooks";
-import { managerEvaluationHook, type ManagerEvent } from "@/workflows/employees/manager-workflow";
+import { managerEvaluationHook, type ManagerEvent, getModelForIC } from "@/workflows/employees/manager-workflow";
 import { trackAICost } from "@/lib/ai/cost-tracking";
 import { get as redisGet, set as redisSet } from "@/lib/redis";
+import { createICTools } from "@/workflows/tools/ic-tools";
+import { validateTools } from "@/workflows/tools/utils";
 import "dotenv/config";
 
 // IC Workflow State
@@ -394,8 +397,10 @@ Respond in JSON format:
   "reasoning": "explanation of breakdown strategy"
 }`;
 
+    const model = getModelForIC(employeeId);
+
     const result = await generateText({
-      model: "openai/gpt-4.1" as never,
+      model: model as never,
       prompt,
     });
 
@@ -403,7 +408,7 @@ Respond in JSON format:
     await trackAICost(result, {
       employeeId,
       taskId: task.id,
-      model: "openai/gpt-4.1",
+      model: model,
       operation: "task_breakdown",
     });
 
@@ -480,6 +485,35 @@ Respond in JSON format:
 
       console.log(
         `[IC ${employeeId}] Created subtask: ${subtask.title} (assigned to: ${assignedToId})`
+      );
+    }
+
+    // Add subtasks assigned to this IC to currentTasks
+    // Reuse the state variable already declared at the start of the function
+    const currentState = await getICState(employeeId);
+    if (currentState) {
+      // Get all created subtasks and filter those assigned to this IC
+      const subtasksAssignedToMe = await db
+        .select()
+        .from(tasks)
+        .where(
+          and(
+            inArray(tasks.id, createdSubtasks),
+            eq(tasks.assignedTo, employeeId)
+          )
+        );
+
+      const mySubtaskIds = subtasksAssignedToMe.map((t) => t.id);
+      const newCurrentTasks = [...currentState.currentTasks, ...mySubtaskIds];
+
+      await setICState(employeeId, {
+        ...currentState,
+        currentTasks: newCurrentTasks,
+        lastActive: new Date().toISOString(),
+      });
+
+      console.log(
+        `[IC ${employeeId}] Added ${mySubtaskIds.length} subtasks to currentTasks`
       );
     }
 
@@ -631,6 +665,30 @@ async function executeCurrentTasks(employeeId: string) {
         continue;
       }
 
+      // Check if this is a high-level task (no parent) that needs breakdown
+      if (!task.parentTaskId) {
+        // Check if subtasks already exist
+        const existingSubtasks = await db
+          .select()
+          .from(tasks)
+          .where(eq(tasks.parentTaskId, taskId));
+
+        if (existingSubtasks.length === 0) {
+          // Break down the high-level task before executing
+          console.log(`[IC ${employeeId}] Task ${taskId} needs breakdown before execution`);
+          await breakDownTask(employeeId, task);
+          // After breakdown, subtasks will be picked up in next iteration
+          // Don't execute the parent task directly
+          continue;
+        } else {
+          // Task has subtasks - don't execute parent, let subtasks be executed
+          console.log(
+            `[IC ${employeeId}] Task ${taskId} has ${existingSubtasks.length} subtasks - skipping parent execution`
+          );
+          continue;
+        }
+      }
+
       // For now, allow parallel execution of subtasks
       // TODO: Implement proper dependency tracking based on task breakdown analysis
       // Subtasks can often be executed in parallel unless explicitly marked as dependent
@@ -646,12 +704,24 @@ async function executeCurrentTasks(employeeId: string) {
           .where(eq(tasks.id, taskId));
       }
 
-      await executeTask(employeeId, task);
+      try {
+        await executeTask(employeeId, task);
+      } catch (taskError) {
+        // Log error but continue with other tasks
+        // The step function will retry executeTask automatically on retryable errors
+        console.error(`[IC ${employeeId}] Task ${taskId} execution failed:`, taskError);
+        // Don't remove from currentTasks - let it retry on next iteration
+        // This allows the workflow to continue processing other tasks
+      }
     }
   } catch (error) {
-    console.error(`[IC ${employeeId}] Error executing current tasks:`, error);
+    console.error(`[IC ${employeeId}] Error in executeCurrentTasks:`, error);
+    // Don't throw - allow workflow to continue and retry on next iteration
   }
 }
+
+// IC tools are now in workflows/tools/ic-tools.ts
+// Removed createICTools function - now imported from @/workflows/tools/ic-tools
 
 /**
  * Executes a single task and creates deliverables
@@ -720,6 +790,69 @@ async function executeTask(
       }
     }
 
+    // Get list of ICs under the same manager (for pingIC tool context)
+    let availableICs: Array<{ id: string; name: string; skills: string[] }> = [];
+    if (state.managerId) {
+      const peerICs = await db
+        .select()
+        .from(employees)
+        .where(and(eq(employees.managerId, state.managerId), eq(employees.role, "ic"), eq(employees.status, "active")))
+        .limit(20);
+      
+      availableICs = peerICs
+        .filter((ic) => ic.id !== employeeId) // Exclude self
+        .map((ic) => ({
+          id: ic.id,
+          name: ic.name,
+          skills: ic.skills,
+        }));
+    }
+
+    // Create tools for this IC
+    // Note: Tools must be created synchronously (not in a step function) to preserve execute functions
+    const tools = createICTools(employeeId, state.managerId);
+    
+    // Validate tools object (ensure all tools have inputSchema)
+    if (!tools || typeof tools !== 'object') {
+      console.error(`[IC ${employeeId}] Invalid tools object created`);
+      throw new Error("Failed to create tools for task execution");
+    }
+    
+    // Validate each tool has a proper inputSchema
+    for (const [toolName, toolDef] of Object.entries(tools)) {
+      if (!toolDef || typeof toolDef !== 'object') {
+        console.error(`[IC ${employeeId}] Tool ${toolName} is invalid`);
+        throw new Error(`Invalid tool definition for ${toolName}`);
+      }
+      // Check if inputSchema exists and is valid (using type assertion to access internal property)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const toolDefAny = toolDef as any;
+      if (!toolDefAny.inputSchema && !toolDefAny.parameters) {
+        console.error(`[IC ${employeeId}] Tool ${toolName} is missing inputSchema/parameters`);
+        throw new Error(`Tool ${toolName} is missing inputSchema/parameters`);
+      }
+      // Validate that inputSchema has the _zod property (internal Zod property)
+      const schema = toolDefAny.inputSchema || toolDefAny.parameters;
+      if (!schema) {
+        console.error(`[IC ${employeeId}] Tool ${toolName} has no schema (inputSchema or parameters)`);
+        throw new Error(`Tool ${toolName} has no schema`);
+      }
+      // Check if schema has _zod property - this is critical for AI SDK
+      // Note: When using tool(), the schema should have _zod, but it might be nested
+      // The tool() function should handle this correctly, so we'll just log a warning
+      if (!schema._zod) {
+        console.warn(`[IC ${employeeId}] Tool ${toolName} inputSchema missing _zod property. Schema type: ${typeof schema}, constructor: ${schema?.constructor?.name}`);
+        // Log schema structure for debugging
+        console.warn(`[IC ${employeeId}] Schema structure:`, {
+          hasShape: !!(schema as any).shape,
+          hasParse: typeof (schema as any).parse === 'function',
+          keys: Object.keys(schema || {}).slice(0, 10), // First 10 keys
+        });
+        // Don't throw - tool() should handle schema correctly even if _zod is not directly accessible
+        // The AI SDK's tool() function wraps the schema properly
+      }
+    }
+
     // Use AI to execute the task
     const prompt = `You are an autonomous IC employee executing a task. Use your skills, learned knowledge, and context to complete this task.
 
@@ -733,6 +866,23 @@ ${revisionFeedback}
 
 Relevant Context from Past Work:
 ${context || "No relevant context yet"}
+
+${availableICs.length > 0 ? `Available ICs under your manager (you can ping them for help):\n${availableICs.map((ic) => `- ${ic.name} (ID: ${ic.id}, Skills: ${ic.skills.join(", ")})`).join("\n")}\n\n` : ""}
+
+You have access to the following tools:
+- pingIC: Ping another IC under your manager for help or collaboration
+- pingManager: Ping your manager to ask questions or provide updates
+- simpleFetch: Make a simple HTTP GET request to fetch data from a URL
+- executeRestAPI: Execute REST API calls (GET, POST, PUT, DELETE, PATCH) to any endpoint
+- searchDeliverables: Search for deliverables by keyword to find similar work or examples
+- getDeliverable: Get the full content of a deliverable by ID to review past work
+- findEmployee: Find employees by name, role, or skills to identify who to contact
+- fetchMemories: Fetch memories from the database to recall past learnings or interactions
+- addMemory: Add a memory to store important learnings or insights for future reference
+- searchTasks: Search for tasks by keyword to find related work or understand context
+- getTask: Get detailed information about a task by ID, including deliverables and status
+
+Use these tools when needed to gather information, collaborate with peers, interact with external APIs, search for relevant past work, or store important learnings. After using tools, continue with the task execution.
 
 Execute this task and produce a deliverable. The deliverable should be:
 - Complete and ready for use
@@ -752,21 +902,145 @@ Respond with a JSON object:
   "improvements": ["improvement1", "improvement2"]
 }`;
 
-    const result = await generateText({
-      model: "openai/gpt-4.1" as never,
-      prompt,
-    });
+    const model = getModelForIC(employeeId);
+
+    // Ensure tools are properly structured before passing to generateText
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const toolsForAI = tools as any;
+    
+    // Double-check tools are valid and filter out any undefined/null tools
+    if (!toolsForAI || typeof toolsForAI !== 'object') {
+      console.error(`[IC ${employeeId}] Tools object is invalid before generateText call`);
+      throw new Error("Invalid tools object");
+    }
+    
+    // Filter out any undefined/null tools and log warnings
+    const validTools: Record<string, any> = {};
+    for (const [toolName, toolDef] of Object.entries(toolsForAI)) {
+      if (!toolDef) {
+        console.warn(`[IC ${employeeId}] Tool ${toolName} is undefined/null, skipping`);
+        continue;
+      }
+      validTools[toolName] = toolDef;
+    }
+    
+    if (Object.keys(validTools).length === 0) {
+      console.error(`[IC ${employeeId}] No valid tools found after filtering`);
+      throw new Error("No valid tools available");
+    }
+    
+    if (Object.keys(validTools).length !== Object.keys(toolsForAI).length) {
+      console.warn(`[IC ${employeeId}] Filtered out ${Object.keys(toolsForAI).length - Object.keys(validTools).length} invalid tools`);
+    }
+
+    // Log tool structure before passing to generateText for debugging
+    console.log(`[IC ${employeeId}] Passing ${Object.keys(validTools).length} tools to generateText`);
+    for (const [toolName, toolDef] of Object.entries(validTools)) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const toolAny = toolDef as any;
+      const schema = toolAny.inputSchema || toolAny.parameters;
+      console.log(`[IC ${employeeId}] Tool ${toolName}:`, {
+        hasInputSchema: !!toolAny.inputSchema,
+        hasParameters: !!toolAny.parameters,
+        hasExecute: typeof toolAny.execute === 'function',
+        schemaType: typeof schema,
+        schemaConstructor: schema?.constructor?.name,
+        hasZod: !!(schema?._zod),
+        schemaKeys: schema ? Object.keys(schema).slice(0, 5) : [],
+      });
+    }
+
+    let result;
+    try {
+      result = await generateText({
+        model: model as never,
+        prompt,
+        tools: validTools,
+      });
+    } catch (error) {
+      console.error(`[IC ${employeeId}] Error in generateText with tools:`, error);
+      console.error(`[IC ${employeeId}] Error details:`, {
+        message: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined,
+      });
+      console.error(`[IC ${employeeId}] Tools object keys:`, Object.keys(validTools));
+      // Log each tool's structure for debugging
+      for (const [toolName, toolDef] of Object.entries(validTools)) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const toolAny = toolDef as any;
+        const schema = toolAny.inputSchema || toolAny.parameters;
+        console.error(`[IC ${employeeId}] Tool ${toolName} structure:`, {
+          hasInputSchema: !!toolAny.inputSchema,
+          hasParameters: !!toolAny.parameters,
+          hasExecute: typeof toolAny.execute === 'function',
+          keys: Object.keys(toolAny),
+          schemaType: typeof schema,
+          schemaConstructor: schema?.constructor?.name,
+          hasZod: !!(schema?._zod),
+          schemaKeys: schema ? Object.keys(schema).slice(0, 10) : [],
+        });
+      }
+      throw error;
+    }
+
+    // Log tool usage if any tools were called
+    if (result.toolCalls && result.toolCalls.length > 0) {
+      console.log(
+        `[IC ${employeeId}] Task ${task.id} used ${result.toolCalls.length} tool(s):`,
+        result.toolCalls.map((tc) => tc.toolName).join(", ")
+      );
+      
+      // Log tool results
+      if (result.toolResults && result.toolResults.length > 0) {
+        for (const tr of result.toolResults) {
+          if (tr.dynamic) continue;
+          const output = tr.output as { success?: boolean; error?: string; message?: string } | undefined;
+          console.log(
+            `[IC ${employeeId}] Tool ${tr.toolName} result:`,
+            output?.success ? "Success" : "Failed",
+            output?.message || output?.error || ""
+          );
+        }
+      }
+    }
 
     // Track cost
     await trackAICost(result, {
       employeeId,
       taskId: task.id,
-      model: "openai/gpt-4.1",
+      model: model,
       operation: "task_execution",
     });
 
     // Parse execution result
+    // If tools were called, the model should have continued after tool execution
+    // If text is empty, try to extract from tool results or use a default
     let text = result.text.trim();
+    
+    if (!text && result.toolResults && result.toolResults.length > 0) {
+      // If only tools were called and no text response, create a summary from tool results
+      const toolSummary = result.toolResults
+        .filter((tr) => !tr.dynamic)
+        .map((tr) => {
+          const output = tr.output as { success?: boolean; error?: string; message?: string } | undefined;
+          if (output?.success) {
+            return `Used ${tr.toolName} successfully${output.message ? `: ${output.message}` : ""}`;
+          } else {
+            return `Tool ${tr.toolName} failed: ${output?.error || "Unknown error"}`;
+          }
+        })
+        .join("; ");
+      
+      text = JSON.stringify({
+        deliverable: {
+          type: "text",
+          content: `Task execution involved tool usage: ${toolSummary}. Please review tool results for details.`,
+        },
+        summary: `Executed task using ${result.toolCalls?.length || 0} tool(s)`,
+        learnedSkills: [],
+        improvements: [],
+      });
+    }
     if (text.startsWith("```json")) {
       text = text.replace(/^```json\n?/, "").replace(/\n?```$/, "");
     } else if (text.startsWith("```")) {
@@ -859,6 +1133,9 @@ Respond with a JSON object:
     console.log(`[IC ${employeeId}] Task ${task.id} completed successfully`);
   } catch (error) {
     console.error(`[IC ${employeeId}] Error executing task:`, error);
+    // Re-throw error so it's visible in workflow logs and can be retried
+    // The step function will automatically retry on retryable errors
+    throw error;
   }
 }
 
@@ -1017,8 +1294,10 @@ Respond in JSON:
   "connections": "how this connects to previous work"
 }`;
 
+    const model = getModelForIC(employeeId);
+
     const result = await generateText({
-      model: "openai/gpt-4.1" as never,
+      model: model as never,
       prompt,
     });
 
@@ -1026,7 +1305,7 @@ Respond in JSON:
     await trackAICost(result, {
       employeeId,
       taskId: taskId,
-      model: "openai/gpt-4.1",
+      model: model,
       operation: "reflection",
     });
 
@@ -1136,8 +1415,10 @@ Respond in JSON:
   ]
 }`;
 
+    const model = getModelForIC(employeeId);
+
     const result = await generateText({
-      model: "openai/gpt-4.1" as never,
+      model: model as never,
       prompt,
     });
 
@@ -1145,7 +1426,7 @@ Respond in JSON:
     await trackAICost(result, {
       employeeId,
       taskId: null, // No specific task for improvement identification
-      model: "openai/gpt-4.1",
+      model: model,
       operation: "improvement_identification",
     });
 
