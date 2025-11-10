@@ -89,7 +89,7 @@ export function StatsOverview({ tasks, employees, deliverables, costs }: StatsOv
       {stats.map((stat) => (
         <Card
           key={stat.title}
-          className="border-0 shadow-none rounded-none border-y md:border-x md:border-y-0 border-border first:border-t-0 md:first:border-l-0 md:first:border-t last:border-0"
+          className="border-0 shadow-none rounded-none border-y md:border-x md:border-y-0 border-border md:first:border-l-0 last:border-0"
         >
           <CardContent className="flex flex-col h-full space-y-2 justify-between">
             <div className="space-y-0.5">

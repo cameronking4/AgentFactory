@@ -17,7 +17,7 @@ export function TaskListItem({ task, employees, isSelected, onClick }: TaskListI
     <div
       onClick={onClick}
       className={`p-4 border-b cursor-pointer transition-colors ${
-        isSelected ? "bg-blue-50 border-blue-200" : "hover:bg-gray-50"
+        isSelected ? "bg-primary/10 border-primary/20" : "hover:bg-muted"
       }`}
     >
       <div className="flex items-start justify-between gap-2 mb-2">
@@ -25,12 +25,12 @@ export function TaskListItem({ task, employees, isSelected, onClick }: TaskListI
           <span
             className={`px-2 py-1 rounded text-xs font-medium border capitalize ${
               task.status === "completed"
-                ? "bg-green-100 text-green-800"
+                ? "bg-green-500/10 text-green-600 dark:text-green-400 border-green-500/20"
                 : task.status === "in-progress"
-                ? "bg-blue-100 text-blue-800"
+                ? "bg-primary/10 text-primary border-primary/20"
                 : task.status === "reviewed"
-                ? "bg-purple-100 text-purple-800"
-                : "bg-gray-100 text-gray-800"
+                ? "bg-purple-500/10 text-purple-600 dark:text-purple-400 border-purple-500/20"
+                : "bg-muted text-muted-foreground border-border"
             }`}
           >
             {task.status}
@@ -38,31 +38,31 @@ export function TaskListItem({ task, employees, isSelected, onClick }: TaskListI
           <span
             className={`px-2 py-1 rounded text-xs font-medium border ${
               task.priority === "critical"
-                ? "bg-red-100 text-red-800"
+                ? "bg-red-500/10 text-red-600 dark:text-red-400 border-red-500/20"
                 : task.priority === "high"
-                ? "bg-orange-100 text-orange-800"
+                ? "bg-orange-500/10 text-orange-600 dark:text-orange-400 border-orange-500/20"
                 : task.priority === "medium"
-                ? "bg-yellow-100 text-yellow-800"
-                : "bg-gray-100 text-gray-800"
+                ? "bg-yellow-500/10 text-yellow-600 dark:text-yellow-400 border-yellow-500/20"
+                : "bg-muted text-muted-foreground border-border"
             }`}
           >
             {task.priority}
           </span>
           {task.parentTaskId && (
-            <span className="px-2 py-1 rounded text-xs font-medium border bg-white">Subtask</span>
+            <span className="px-2 py-1 rounded text-xs font-medium border bg-card">Subtask</span>
           )}
         </div>
-        <span className="text-xs text-gray-500 whitespace-nowrap">
+        <span className="text-xs text-muted-foreground whitespace-nowrap">
           {new Date(task.createdAt).toLocaleDateString()}
         </span>
       </div>
-      <div className="text-sm font-medium text-gray-900 mb-1 line-clamp-1">{task.title}</div>
+      <div className="text-sm font-medium text-foreground mb-1 line-clamp-1">{task.title}</div>
       {assignee && (
-        <Badge className="text-xs text-gray-600" variant="outline">
+        <Badge className="text-xs" variant="outline">
           Assigned to {assignee.name}
         </Badge>
       )}
-      <div className="text-xs text-gray-500 mt-2 line-clamp-2">{task.description}</div>
+      <div className="text-xs text-muted-foreground mt-2 line-clamp-2">{task.description}</div>
     </div>
   );
 }

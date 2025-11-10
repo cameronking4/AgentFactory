@@ -20,7 +20,7 @@ export default function CEODashboard() {
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const [autoRefresh, setAutoRefresh] = useState(true);
-  const [viewMode, setViewMode] = useState<ViewMode>("tasks");
+  const [viewMode, setViewMode] = useState<ViewMode>("overview");
   const [selectedTask, setSelectedTask] = useState<Task | null>(null);
   const [selectedEmployee, setSelectedEmployee] = useState<Employee | null>(null);
   const [selectedDeliverable, setSelectedDeliverable] = useState<Deliverable | null>(null);

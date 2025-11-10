@@ -4,7 +4,9 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import type { Task, Employee, Deliverable, Cost } from "../types";
-import { ArrowRight } from "lucide-react";
+import { ArrowRight, HandHeart } from "lucide-react";
+import { ActivityFeed } from "../ActivityFeed";
+import { Progress } from "@/components/ui/progress";
 
 interface OverviewTabProps {
   tasks: Task[];
@@ -13,12 +15,11 @@ interface OverviewTabProps {
   costs: Cost[];
 }
 
-export function OverviewTab({ tasks, employees, deliverables, costs }: OverviewTabProps) {
-  const activeEmployees = employees.filter((e) => e.status === "active");
+export function OverviewTab({ tasks, deliverables, costs }: OverviewTabProps) {
 
   return (
     <div className="space-y-6">
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
 
       <Card className="shadow-xl">
         <CardHeader>
@@ -52,12 +53,12 @@ export function OverviewTab({ tasks, employees, deliverables, costs }: OverviewT
                   <div className="text-sm text-muted-foreground text-center">
                     {/* Placeholder chat UI */}
                     <div className="mb-4">
-                      <span className="inline-block rounded-full bg-gray-200 px-4 py-2 text-gray-600">
+                      <span className="inline-block rounded-full bg-muted px-4 py-2 text-muted-foreground">
                         Welcome to the Chat! Start typing to dive deeper into your data.
                       </span>
                     </div>
-                    <div className="rounded border p-2 bg-white w-full max-w-md h-48 flex flex-col justify-end">
-                      <div className="flex-1 flex items-end justify-center text-gray-400">
+                    <div className="rounded border p-2 bg-card w-full max-w-md h-48 flex flex-col justify-end">
+                      <div className="flex-1 flex items-end justify-center text-muted-foreground">
                         <span>Chat history will appear here...</span>
                       </div>
                     </div>
@@ -74,16 +75,29 @@ export function OverviewTab({ tasks, employees, deliverables, costs }: OverviewT
               </div>
             </SheetContent>
           </Sheet>
+          <Button variant="outline" className="w-full mt-4"><HandHeart className="w-4 h-4" /> Schedule All-Hands Meeting</Button>
         </CardContent>
       </Card>
       
         <Card>
           <CardHeader>
             <CardTitle className="text-lg">Tasks Overview</CardTitle>
+            <Progress value={tasks.filter((t) => t.status === "in-progress").length} max={tasks.length} className="w-full"/>
+            <p className="text-sm text-muted-foreground mt-1">
+              {tasks.length > 0
+                ? `${Math.round((tasks.filter((t) => t.status === "completed").length / tasks.length) * 100)}% tasks completed`
+                : "No tasks yet"}
+            </p>
           </CardHeader>
           
           <CardContent>
             <div className="space-y-2">
+              <div className="flex justify-between">
+                <span className="text-sm text-muted-foreground">Total Tasks</span>
+                <span className="font-semibold">
+                  {tasks.length}
+                </span>
+              </div>
               <div className="flex justify-between">
                 <span className="text-sm text-muted-foreground">In-progress</span>
                 <span className="font-semibold">
@@ -108,28 +122,11 @@ export function OverviewTab({ tasks, employees, deliverables, costs }: OverviewT
           </CardContent>
         </Card>
 
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-lg">Workforce Overview</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="space-y-2">
-              <div className="flex justify-between">
-                <span className="text-sm text-muted-foreground">Total Employees</span>
-                <span className="font-semibold">{employees.length}</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-sm text-muted-foreground">Active</span>
-                <span className="font-semibold">{activeEmployees.length}</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-sm text-muted-foreground">Managers</span>
-                <span className="font-semibold">{employees.filter((e) => e.role === "manager").length}</span>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
+      </div>
 
+      {/* Activity Feed - Full width below summary cards */}
+      <div className="mt-6">
+        <ActivityFeed autoRefresh={true} refreshInterval={5000} limit={50} hours={4} />
       </div>
 
     </div>

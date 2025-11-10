@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useEffect } from "react";
 import { EmptyState } from "../shared/EmptyState";
 import { DetailPanel } from "../shared/DetailPanel";
 import { DeliverableListItem } from "./deliverables/DeliverableListItem";
@@ -52,9 +52,9 @@ export function DeliverablesTab({
       <div className="grid grid-cols-1 lg:grid-cols-2 h-[calc(100vh-300px)]">
         {/* Left Panel - Deliverables List */}
         <div className="border-r overflow-hidden flex flex-col">
-          <div className="p-4 border-b bg-gray-50">
+          <div className="p-4 border-b bg-muted">
             <h2 className="text-xl font-semibold">All Deliverables</h2>
-            <p className="text-sm text-gray-600 mt-1">{deliverables.length} total</p>
+            <p className="text-sm text-muted-foreground mt-1">{deliverables.length} total</p>
           </div>
           <div className="flex-1 overflow-y-auto">
             {deliverables

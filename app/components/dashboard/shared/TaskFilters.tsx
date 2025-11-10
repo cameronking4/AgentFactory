@@ -50,26 +50,50 @@ export function TaskFilters({
           <div className="space-y-2">
             <div className="flex items-center justify-between mb-2">
               <span className="text-sm font-medium">Filter by Status</span>
-              {taskStatusFilter.size < 4 && (
-                <button
+              <div className="flex gap-1">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="text-xs px-2 h-7"
                   onClick={onStatusFilterReset}
-                  className="text-xs text-blue-600 hover:text-blue-800"
+                  disabled={taskStatusFilter.size === 4}
                 >
                   Select all
-                </button>
-              )}
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="text-xs px-2 h-7"
+                  onClick={() => {
+                    // Deselect all
+                    ["pending", "in-progress", "completed", "reviewed"].forEach((status) => {
+                      if (taskStatusFilter.has(status as Task["status"])) {
+                        onStatusFilterToggle(status as Task["status"]);
+                      }
+                    });
+                  }}
+                  disabled={taskStatusFilter.size === 0}
+                >
+                  Deselect all
+                </Button>
+              </div>
             </div>
-            {(["pending", "in-progress", "completed", "reviewed"] as Task["status"][]).map((status) => (
-              <label key={status} className="flex items-center space-x-2 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={taskStatusFilter.has(status)}
-                  onChange={() => onStatusFilterToggle(status)}
-                  className="rounded"
-                />
-                <span className="text-sm capitalize">{status}</span>
-              </label>
-            ))}
+            <div className="flex flex-col gap-1">
+              {(["pending", "in-progress", "completed", "reviewed"] as Task["status"][]).map((status) => (
+                <label key={status} className="flex items-center space-x-2 cursor-pointer py-1 px-2 rounded-md hover:bg-muted transition-colors">
+                  <input
+                    type="checkbox"
+                    checked={taskStatusFilter.has(status)}
+                    onChange={() => onStatusFilterToggle(status)}
+                    className="rounded accent-blue-500"
+                  />
+                  <span className="text-sm capitalize">{status.replace("-", " ")}</span>
+                </label>
+              ))}
+            </div>
+            <span className="text-xs text-muted-foreground mt-1 block">
+              Tip: You can select multiple statuses at once. Use the buttons above to quickly select or deselect all.
+            </span>
           </div>
         </PopoverContent>
       </Popover>
@@ -118,7 +142,7 @@ export function TaskFilters({
               {taskDateRangePreset && (
                 <button
                   onClick={() => onDateRangePresetChange(null)}
-                  className="text-xs text-blue-600 hover:text-blue-800 flex items-center gap-1"
+                  className="text-xs text-primary hover:underline flex items-center gap-1"
                 >
                   <X className="w-3 h-3" />
                   Clear
@@ -132,8 +156,8 @@ export function TaskFilters({
                   onClick={() => onDateRangePresetChange(preset === taskDateRangePreset ? null : preset)}
                   className={`w-full text-left px-2 py-1.5 rounded text-sm transition-colors ${
                     taskDateRangePreset === preset
-                      ? "bg-blue-100 text-blue-800"
-                      : "hover:bg-gray-100"
+                      ? "bg-primary/10 text-primary"
+                      : "hover:bg-muted"
                   }`}
                 >
                   {dateRangePresetLabels[preset]}

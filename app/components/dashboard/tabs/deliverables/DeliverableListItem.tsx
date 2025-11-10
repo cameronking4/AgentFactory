@@ -24,27 +24,27 @@ export function DeliverableListItem({
     <div
       onClick={onClick}
       className={`p-4 border-b cursor-pointer transition-colors ${
-        isSelected ? "bg-blue-50 border-blue-200" : "hover:bg-gray-50"
+        isSelected ? "bg-primary/10 border-primary/20" : "hover:bg-muted"
       }`}
     >
       <div className="flex items-start justify-between gap-2 mb-2">
         <div className="flex gap-2 items-center flex-wrap">
-          <span className="px-2 py-1 rounded text-xs font-medium border capitalize bg-white">
+          <span className="px-2 py-1 rounded text-xs font-medium border capitalize bg-card">
             {deliverable.type}
           </span>
           {deliverable.evaluationScore !== null && (
-            <span className="px-2 py-1 rounded text-xs font-medium border bg-green-100 text-green-800">
+            <span className="px-2 py-1 rounded text-xs font-medium border bg-green-500/10 text-green-600 dark:text-green-400 border-green-500/20">
               {deliverable.evaluationScore}/10
             </span>
           )}
         </div>
-        <span className="text-xs text-gray-500 whitespace-nowrap">
+        <span className="text-xs text-muted-foreground whitespace-nowrap">
           {new Date(deliverable.createdAt).toLocaleDateString()}
         </span>
       </div>
-      {task && <div className="text-sm font-medium text-gray-900 mb-1 line-clamp-1">{task.title}</div>}
-      {creator && <div className="text-xs text-gray-600">by {creator.name}</div>}
-      <div className="text-xs text-gray-500 mt-2 line-clamp-2">
+      {task && <div className="text-sm font-medium text-foreground mb-1 line-clamp-1">{task.title}</div>}
+      {creator && <div className="text-xs text-muted-foreground">by {creator.name}</div>}
+      <div className="text-xs text-muted-foreground mt-2 line-clamp-2">
         {deliverable.content.substring(0, 100)}
         {deliverable.content.length > 100 && "..."}
       </div>

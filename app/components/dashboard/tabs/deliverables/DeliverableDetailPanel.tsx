@@ -28,22 +28,22 @@ export function DeliverableDetailPanel({
 
   return (
     <>
-      <div className="p-6 border-b bg-gray-50">
+      <div className="p-6 border-b bg-muted">
         <div className="flex items-start justify-between gap-4 mb-4">
           <div className="flex-1">
             <div className="flex gap-2 items-center mb-2">
-              <span className="px-3 py-1 rounded text-sm font-medium border capitalize bg-white">
+              <span className="px-3 py-1 rounded text-sm font-medium border capitalize bg-card">
                 {deliverable.type}
               </span>
               {deliverable.evaluationScore !== null && (
-                <span className="px-3 py-1 rounded text-sm font-medium border bg-green-100 text-green-800">
+                <span className="px-3 py-1 rounded text-sm font-medium border bg-green-500/10 text-green-600 dark:text-green-400 border-green-500/20">
                   Score: {deliverable.evaluationScore}/10
                 </span>
               )}
             </div>
-            {task && <h3 className="text-lg font-semibold text-gray-900 mb-2">{task.title}</h3>}
+            {task && <h3 className="text-lg font-semibold text-foreground mb-2">{task.title}</h3>}
           </div>
-          <span className="text-sm text-gray-500 whitespace-nowrap">
+          <span className="text-sm text-muted-foreground whitespace-nowrap">
             {new Date(deliverable.createdAt).toLocaleString()}
           </span>
         </div>
@@ -51,9 +51,9 @@ export function DeliverableDetailPanel({
         <div className="grid grid-cols-2 gap-4 text-sm">
           {task && (
             <div>
-              <span className="text-gray-600">Task: </span>
+              <span className="text-muted-foreground">Task: </span>
               <span
-                className="text-blue-600 cursor-pointer hover:underline font-medium"
+                className="text-primary cursor-pointer hover:underline font-medium"
                 onClick={() => {
                   onTaskSelect(task);
                   onViewModeChange("tasks");
@@ -65,9 +65,9 @@ export function DeliverableDetailPanel({
           )}
           {creator && (
             <div>
-              <span className="text-gray-600">Created by: </span>
+              <span className="text-muted-foreground">Created by: </span>
               <span
-                className="text-blue-600 cursor-pointer hover:underline font-medium"
+                className="text-primary cursor-pointer hover:underline font-medium"
                 onClick={() => {
                   onEmployeeSelect(creator);
                   onViewModeChange("employees");
@@ -79,9 +79,9 @@ export function DeliverableDetailPanel({
           )}
           {evaluator && (
             <div>
-              <span className="text-gray-600">Evaluated by: </span>
+              <span className="text-muted-foreground">Evaluated by: </span>
               <span
-                className="text-blue-600 cursor-pointer hover:underline font-medium"
+                className="text-primary cursor-pointer hover:underline font-medium"
                 onClick={() => {
                   onEmployeeSelect(evaluator);
                   onViewModeChange("employees");
@@ -94,19 +94,19 @@ export function DeliverableDetailPanel({
         </div>
 
         {deliverable.feedback && (
-          <div className="mt-4 p-3 rounded-lg bg-yellow-50 border border-yellow-200">
-            <div className="text-sm font-medium text-yellow-900 mb-1">Feedback:</div>
-            <div className="text-sm text-yellow-800">{deliverable.feedback}</div>
+          <div className="mt-4 p-3 rounded-lg bg-yellow-500/10 border border-yellow-500/20">
+            <div className="text-sm font-medium text-yellow-600 dark:text-yellow-400 mb-1">Feedback:</div>
+            <div className="text-sm text-yellow-700 dark:text-yellow-300">{deliverable.feedback}</div>
           </div>
         )}
       </div>
 
       <div className="flex-1 overflow-y-auto p-6">
         <div className="mb-4">
-          <h4 className="text-sm font-semibold text-gray-700 mb-2">Content</h4>
+          <h4 className="text-sm font-semibold text-foreground mb-2">Content</h4>
         </div>
-        <div className="rounded-lg border bg-gray-50 p-4">
-          <pre className="text-sm whitespace-pre-wrap font-mono overflow-x-auto text-gray-900">
+        <div className="rounded-lg border bg-muted p-4">
+          <pre className="text-sm whitespace-pre-wrap font-mono overflow-x-auto text-foreground">
             {deliverable.content}
           </pre>
         </div>

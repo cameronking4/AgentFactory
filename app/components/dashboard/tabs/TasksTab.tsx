@@ -120,11 +120,11 @@ export function TasksTab({
       <div className="grid grid-cols-1 lg:grid-cols-2 h-[calc(100vh-300px)]">
         {/* Left Panel - Tasks List */}
         <div className="border-r overflow-hidden flex flex-col">
-          <div className="p-4 border-b bg-gray-50">
+          <div className="p-4 border-b bg-muted">
             <div className="flex justify-between items-start mb-3">
               <div>
                 <h2 className="text-xl font-semibold">All Tasks</h2>
-                <p className="text-sm text-gray-600 mt-1">
+                <p className="text-sm text-muted-foreground mt-1">
                   {filteredTasks.length} of {tasks.length} tasks
                 </p>
               </div>
@@ -152,11 +152,11 @@ export function TasksTab({
           </div>
           <div className="flex-1 overflow-y-auto">
             {filteredTasks.length === 0 ? (
-              <div className="p-8 text-center text-gray-500">
+              <div className="p-8 text-center text-muted-foreground">
                 <p>No tasks match the current filters.</p>
                 <button
                   onClick={clearAllFilters}
-                  className="mt-2 text-sm text-blue-600 hover:text-blue-800 underline"
+                  className="mt-2 text-sm text-primary hover:underline"
                 >
                   Clear all filters
                 </button>

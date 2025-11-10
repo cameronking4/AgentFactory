@@ -57,16 +57,16 @@ export function MeetingsTab({
       <div className="grid grid-cols-1 lg:grid-cols-2 h-[calc(100vh-300px)]">
         {/* Left Panel - Meetings List */}
         <div className="border-r overflow-hidden flex flex-col">
-          <div className="p-4 border-b bg-gray-50">
+          <div className="p-4 border-b bg-muted">
             <div className="flex justify-between items-center mb-2">
               <div>
                 <h2 className="text-xl font-semibold">All Meetings</h2>
-                <p className="text-sm text-gray-600 mt-1">{meetings.length} total</p>
+                <p className="text-sm text-muted-foreground mt-1">{meetings.length} total</p>
               </div>
               <button
                 onClick={onTriggerStandups}
                 disabled={loading}
-                className="px-3 py-1.5 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                className="px-3 py-1.5 text-sm bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {loading ? "Triggering..." : "Trigger Standups"}
               </button>

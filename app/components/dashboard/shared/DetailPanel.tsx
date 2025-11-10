@@ -9,7 +9,7 @@ interface DetailPanelProps {
 export function DetailPanel({ children, emptyTitle, emptyDescription }: DetailPanelProps) {
   if (!children) {
     return (
-      <div className="flex-1 flex items-center justify-center text-gray-500">
+      <div className="flex-1 flex items-center justify-center text-muted-foreground">
         <div className="text-center">
           <p className="text-lg mb-2">{emptyTitle || "Select an item"}</p>
           <p className="text-sm">{emptyDescription || "Choose an item from the list to view details"}</p>
@@ -18,6 +18,6 @@ export function DetailPanel({ children, emptyTitle, emptyDescription }: DetailPa
     );
   }
 
-  return <div className="overflow-hidden flex flex-col bg-white">{children}</div>;
+  return <div className="overflow-hidden flex flex-col bg-card">{children}</div>;
 }
 

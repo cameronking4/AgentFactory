@@ -3,6 +3,9 @@
 import { useState } from "react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { EllipsisVerticalIcon, Sun, Moon } from "lucide-react";
+import { useTheme } from "next-themes";
 
 interface HeaderProps {
   hrId: string | null;
@@ -15,6 +18,7 @@ export function Header({ hrId, onCreateTask, onClearDatabase, loading }: HeaderP
   const [taskTitle, setTaskTitle] = useState("");
   const [taskDescription, setTaskDescription] = useState("");
   const [taskDialogOpen, setTaskDialogOpen] = useState(false);
+  const { theme, setTheme } = useTheme();
 
   const handleCreateTask = async () => {
     if (!taskTitle.trim() || !taskDescription.trim()) return;
@@ -79,9 +83,35 @@ export function Header({ hrId, onCreateTask, onClearDatabase, loading }: HeaderP
               </div>
             </DialogContent>
           </Dialog>
-          <Button onClick={onClearDatabase} variant="outline">
-            Layoff Staff
+          <Button
+            variant="outline"
+            size="icon"
+            onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
+            aria-label="Toggle theme"
+          >
+            {theme === "dark" ? (
+              <Sun className="w-4 h-4" />
+            ) : (
+              <Moon className="w-4 h-4" />
+            )}
           </Button>
+          <Popover>
+            <PopoverTrigger asChild>
+              <Button variant="outline" size="icon" aria-label="More options">
+                <span className="sr-only">More options</span>
+                <EllipsisVerticalIcon className="w-4 h-4" />
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent className="w-48 p-1" align="end">
+              <button
+                onClick={onClearDatabase}
+                className="w-full text-left px-4 py-2 text-sm rounded hover:bg-red-50 focus:outline-none focus:bg-red-100 text-red-700"
+                disabled={loading}
+              >
+                Layoff Staff
+              </button>
+            </PopoverContent>
+          </Popover>
         </div>
       </div>
     </div>

@@ -16,7 +16,7 @@ export function EmployeeListItem({ employee, employees, isSelected, onClick }: E
     <div
       onClick={onClick}
       className={`p-4 border-b cursor-pointer transition-colors ${
-        isSelected ? "bg-blue-50 border-blue-200" : "hover:bg-gray-50"
+        isSelected ? "bg-primary/10 border-primary/20" : "hover:bg-muted"
       }`}
     >
       <div className="flex items-start justify-between gap-2 mb-2">
@@ -24,22 +24,22 @@ export function EmployeeListItem({ employee, employees, isSelected, onClick }: E
           <span
             className={`px-2 py-1 rounded text-xs font-medium border capitalize ${
               employee.role === "manager"
-                ? "bg-purple-100 text-purple-800"
-                : "bg-blue-100 text-blue-800"
+                ? "bg-purple-500/10 text-purple-600 dark:text-purple-400 border-purple-500/20"
+                : "bg-primary/10 text-primary border-primary/20"
             }`}
           >
             {employee.role.toUpperCase()}
           </span>
           {employee.status === "terminated" && (
-            <span className="px-2 py-1 rounded text-xs font-medium border bg-red-100 text-red-800">
+            <span className="px-2 py-1 rounded text-xs font-medium border bg-destructive/10 text-destructive border-destructive/20">
               Terminated
             </span>
           )}
         </div>
       </div>
-      <div className="text-sm font-medium text-gray-900 mb-1">{employee.name}</div>
-      {manager && <div className="text-xs text-gray-600">Manager: {manager.name}</div>}
-      <div className="text-xs text-gray-500 mt-2 line-clamp-1">Skills: {employee.skills.join(", ")}</div>
+      <div className="text-sm font-medium text-foreground mb-1">{employee.name}</div>
+      {manager && <div className="text-xs text-muted-foreground">Manager: {manager.name}</div>}
+      <div className="text-xs text-muted-foreground mt-2 line-clamp-1">Skills: {employee.skills.join(", ")}</div>
     </div>
   );
 }
